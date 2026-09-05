@@ -378,22 +378,11 @@ async fn run_session(
                     }
                 }
             }
-            message = socket.next() => {
-                let message = message
-                    .ok_or_else(|| "Cloud recognition connection was closed".to_string())?
-                    .map_err(|error| format!("Failed to read cloud recognition event: {error}"))?;
-                match message {
-                    Message::Text(text) => {
-                        if let Some(event) = normalize_event(provider, config, &text, &mut normalization)? {
-                            if events.send(event).await.is_err() {
-                                return Ok(());
-                            }
-                        }
+            message = receive_event(socket) => {
+                if let Some(event) = provider.normalize_event(config, &message?, &mut normalization)? {
+                    if events.send(event).await.is_err() {
+                        return Ok(());
                     }
-                    Message::Close(_) => return Err("Cloud recognition service closed the connection".into()),
-                    Message::Ping(value) => socket.send(Message::Pong(value)).await
-                        .map_err(|error| format!("Cloud recognition heartbeat failed: {error}"))?,
-                    _ => {}
                 }
             }
         }
@@ -428,51 +417,64 @@ async fn connect_initialized(
     .map_err(|_| "Timed out while connecting to cloud recognition service".to_string())??;
     let task_id = provider.task_id();
     let update = provider.start_message(config, silence_seconds, task_id.as_deref())?;
+    initialize_socket(provider, &mut socket, update).await?;
+    Ok((socket, task_id))
+}
+
+async fn initialize_socket(
+    provider: Provider,
+    socket: &mut Socket,
+    update: Value,
+) -> Result<(), String> {
     socket
         .send(Message::Text(update.to_string().into()))
         .await
         .map_err(|error| format!("Failed to initialize cloud recognition session: {error}"))?;
-    let configured = tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let message = socket
-                .next()
-                .await
-                .ok_or_else(|| {
-                    "Cloud recognition connection closed during initialization".to_string()
-                })?
-                .map_err(|error| {
-                    format!("Failed to read cloud recognition initialization event: {error}")
-                })?;
-            match message {
-                Message::Text(text) => {
-                    let value: Value = serde_json::from_str(&text).map_err(|error| {
-                        format!("Cloud recognition returned invalid JSON: {error}")
-                    })?;
-                    match provider.initialization_event(&value) {
-                        InitializationEvent::Ready => return Ok(()),
-                        InitializationEvent::Failed(detail) => return Err(detail),
-                        InitializationEvent::Pending => {}
-                    }
-                }
-                Message::Ping(value) => socket
-                    .send(Message::Pong(value))
-                    .await
-                    .map_err(|error| format!("Cloud recognition heartbeat failed: {error}"))?,
-                Message::Close(_) => {
-                    return Err(
-                        "Cloud recognition service closed the initialization connection".into(),
-                    )
-                }
-                _ => {}
+            match provider.initialization_event(&receive_event(socket).await?) {
+                InitializationEvent::Ready => return Ok(()),
+                InitializationEvent::Failed(detail) => return Err(detail),
+                InitializationEvent::Pending => {}
             }
         }
     })
     .await
-    .map_err(|_| "Timed out waiting for cloud recognition session confirmation".to_string())?;
-    configured?;
-    Ok((socket, task_id))
+    .map_err(|_| "Timed out waiting for cloud recognition session confirmation".to_string())?
 }
 
+async fn receive_event(socket: &mut Socket) -> Result<Value, String> {
+    loop {
+        let message = socket
+            .next()
+            .await
+            .ok_or_else(|| "Cloud recognition connection was closed".to_string())?
+            .map_err(|error| format!("Failed to read cloud recognition event: {error}"))?;
+        let parsed = match message {
+            Message::Text(text) => serde_json::from_str(&text),
+            Message::Binary(bytes) => serde_json::from_slice(&bytes),
+            Message::Close(frame) => {
+                let detail = frame
+                    .map(|frame| format!(": {} {}", frame.code, frame.reason))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "Cloud recognition service closed the connection{detail}"
+                ));
+            }
+            Message::Ping(value) => {
+                socket
+                    .send(Message::Pong(value))
+                    .await
+                    .map_err(|error| format!("Cloud recognition heartbeat failed: {error}"))?;
+                continue;
+            }
+            _ => continue,
+        };
+        return parsed.map_err(|error| format!("Cloud recognition returned invalid JSON: {error}"));
+    }
+}
+
+#[cfg(test)]
 fn normalize_event(
     provider: Provider,
     config: &AsrConfig,
@@ -542,12 +544,10 @@ async fn finish(
     loop {
         tokio::select! {
             _ = &mut deadline => break,
-            message = socket.next() => {
-                let Some(Ok(Message::Text(text))) = message else { break };
-                let finished = serde_json::from_str::<Value>(&text)
-                    .ok()
-                    .is_some_and(|value| provider.is_finished(&value));
-                if let Ok(Some(event)) = normalize_event(provider, config, &text, state) {
+            message = receive_event(socket) => {
+                let Ok(value) = message else { break };
+                let finished = provider.is_finished(&value);
+                if let Ok(Some(event)) = provider.normalize_event(config, &value, state) {
                     let _ = events.send(event).await;
                 }
                 if finished {
@@ -596,6 +596,157 @@ fn resample_16k_to_24k(samples: &[f32]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn socket_pair() -> (Socket, WebSocketStream<TcpStream>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (client, server) = tokio::join!(tokio_tungstenite::connect_async(url), async {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(stream).await.unwrap()
+        });
+        (client.unwrap().0, server)
+    }
+
+    fn json_frame(value: Value, binary: bool) -> Message {
+        if binary {
+            Message::Binary(serde_json::to_vec(&value).unwrap().into())
+        } else {
+            Message::Text(value.to_string().into())
+        }
+    }
+
+    #[tokio::test]
+    async fn gemini_initializes_with_text_and_binary_confirmation() {
+        for binary in [false, true] {
+            let (mut client, mut server) = socket_pair().await;
+            let config = AsrConfig::default();
+            let update = Provider::Gemini.start_message(&config, 0.4, None).unwrap();
+            let exchange = async {
+                tokio::join!(
+                    initialize_socket(Provider::Gemini, &mut client, update),
+                    async {
+                        assert!(matches!(server.next().await, Some(Ok(Message::Text(_)))));
+                        server.send(Message::Ping(vec![1].into())).await.unwrap();
+                        server
+                            .send(json_frame(serde_json::json!({"setupComplete":{}}), binary))
+                            .await
+                            .unwrap();
+                    }
+                )
+                .0
+                .unwrap();
+            };
+            tokio::time::timeout(Duration::from_secs(2), exchange)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn gemini_streams_binary_transcripts_and_drains_the_last_sentence() {
+        for binary in [false, true] {
+            let (mut client, mut server) = socket_pair().await;
+            let config = AsrConfig::default();
+            let (audio_tx, mut audio_rx) = mpsc::channel(1);
+            let (event_tx, mut event_rx) = mpsc::channel(4);
+            let (stop_tx, mut stop_rx) = watch::channel(false);
+            let (audio_seen_tx, audio_seen_rx) = oneshot::channel();
+            let task = tokio::spawn(async move {
+                run_session(
+                    Provider::Gemini,
+                    &config,
+                    &mut client,
+                    None,
+                    &mut audio_rx,
+                    &event_tx,
+                    &mut stop_rx,
+                )
+                .await
+            });
+            let server_task = tokio::spawn(async move {
+                server.send(json_frame(serde_json::json!({"serverContent":{"interimInputTranscription":{"text":"hello"}}}), binary)).await.unwrap();
+                let audio = server.next().await.unwrap().unwrap();
+                assert!(audio.to_text().unwrap().contains("audio/pcm"));
+                audio_seen_tx.send(()).unwrap();
+                let commit = server.next().await.unwrap().unwrap();
+                assert!(commit.to_text().unwrap().contains("audioStreamEnd"));
+                server.send(Message::Ping(vec![2].into())).await.unwrap();
+                server.send(json_frame(serde_json::json!({"serverContent":{"inputTranscription":{"text":"hello world"}}}), binary)).await.unwrap();
+                server.close(None).await.unwrap();
+            });
+            let exchange = async {
+                let partial_id = match event_rx.recv().await.unwrap() {
+                    CloudEvent::Partial {
+                        utterance_id, text, ..
+                    } => {
+                        assert_eq!(text, "hello");
+                        utterance_id
+                    }
+                    other => panic!("unexpected event: {other:?}"),
+                };
+                audio_tx
+                    .send(StreamingInput::Audio(std::sync::Arc::new(
+                        vec![0.0; AUDIO_PACKET_SAMPLES],
+                    )))
+                    .await
+                    .unwrap();
+                audio_seen_rx.await.unwrap();
+                stop_tx.send(true).unwrap();
+                task.await.unwrap().unwrap();
+                assert!(
+                    matches!(event_rx.recv().await, Some(CloudEvent::Final { utterance_id, text, .. })
+                    if utterance_id == partial_id && text == "hello world")
+                );
+                server_task.await.unwrap();
+            };
+            tokio::time::timeout(Duration::from_secs(2), exchange)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cloud_initialization_reports_binary_errors_and_close_reasons() {
+        use tokio_tungstenite::tungstenite::{
+            protocol::frame::coding::CloseCode, protocol::CloseFrame,
+        };
+        for (frame, expected) in [
+            (
+                json_frame(
+                    serde_json::json!({"error":{"message":"Model unavailable"}}),
+                    true,
+                ),
+                "Model unavailable",
+            ),
+            (
+                Message::Close(Some(CloseFrame {
+                    code: CloseCode::Policy,
+                    reason: "Permission denied".into(),
+                })),
+                "1008 Permission denied",
+            ),
+            (Message::Binary(vec![0xff].into()), "invalid JSON"),
+        ] {
+            let (mut client, mut server) = socket_pair().await;
+            let exchange = async {
+                let (result, ()) = tokio::join!(
+                    initialize_socket(
+                        Provider::Gemini,
+                        &mut client,
+                        serde_json::json!({"setup":{}})
+                    ),
+                    async {
+                        server.next().await.unwrap().unwrap();
+                        server.send(frame).await.unwrap();
+                    }
+                );
+                assert!(result.unwrap_err().contains(expected));
+            };
+            tokio::time::timeout(Duration::from_secs(2), exchange)
+                .await
+                .unwrap();
+        }
+    }
 
     fn normalize(
         config: &AsrConfig,

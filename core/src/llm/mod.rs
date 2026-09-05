@@ -90,7 +90,7 @@ impl LlmClient {
                     alibaba::generate(&self.http, profile, api_key, request, on_progress).await
                 }
                 ServiceAdapter::GeminiGenerateContent => {
-                    gemini::generate(&self.http, api_key, request, on_progress).await
+                    gemini::generate(&self.http, profile, api_key, request, on_progress).await
                 }
                 adapter => Err(unsupported_adapter(adapter)),
             },
