@@ -567,3 +567,49 @@ fn disabled_or_unknown_sources_are_not_presented() {
     state.apply(final_event(item), now, &config);
     assert!(state.frame(now, &config).is_none());
 }
+
+#[test]
+fn native_translation_can_arrive_before_the_original() {
+    let now = Instant::now();
+    let snapshot = vrcs_core::LiveTranslation {
+        utterance_id: "native-1".into(),
+        text: String::new(),
+        language: None,
+        translation: "hello".into(),
+        target_language: "en".into(),
+    };
+    let event = PresentationEvent::LiveTranslationUpdated {
+        source: "speaker".into(),
+        snapshot,
+    };
+    let config = VrOverlayHeadsetConfig {
+        show_partials: true,
+        show_translation_partials: true,
+        content_mode: "bilingual".into(),
+        ..Default::default()
+    };
+    let mut headset = HeadsetPresentation::default();
+    headset.apply(event.clone(), now, &config);
+    assert!(headset
+        .partial
+        .as_ref()
+        .is_some_and(|item| item.original.is_empty() && item.translations[0].text == "hello"));
+    headset.apply(
+        PresentationEvent::RecognitionCancelled {
+            source: "speaker".into(),
+            utterance_id: "native-1".into(),
+        },
+        now,
+        &config,
+    );
+    headset.apply(event.clone(), now, &config);
+    assert!(headset.partial.is_none());
+    let mut wrist = WristPresentation::default();
+    let wrist_config = VrOverlayWristConfig {
+        show_partials: true,
+        show_translation_partials: false,
+        ..Default::default()
+    };
+    wrist.apply(event, now, &wrist_config);
+    assert!(wrist.partials[0].translations.is_empty());
+}

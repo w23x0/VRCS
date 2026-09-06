@@ -35,8 +35,16 @@ impl AppConfig {
         validate_recognition_options(&self.asr)?;
         validate_api_profiles(&self.asr)?;
         validate_glossary(&self.glossary)?;
-        validate_translation(&self.translation, &self.asr.api_profiles)?;
-        validate_language_presets(&self.language_presets, &self.asr.api_profiles)?;
+        validate_translation(
+            &self.translation,
+            &self.asr.api_profiles,
+            self.asr.backend == providers::SERVICE_GEMINI_LIVE_TRANSLATE,
+        )?;
+        validate_language_presets(
+            &self.language_presets,
+            &self.asr.api_profiles,
+            self.asr.backend == providers::SERVICE_GEMINI_LIVE_TRANSLATE,
+        )?;
         validate_osc(&self.osc)?;
         validate_recognition_models(&self.asr, &self.vad)?;
         validate_anki(&self.anki)?;
@@ -410,6 +418,7 @@ fn validate_api_profiles(asr: &AsrConfig) -> Result<(), String> {
 fn validate_translation(
     translation: &TranslationConfig,
     profiles: &[ApiProfile],
+    live_translate: bool,
 ) -> Result<(), String> {
     validate_translation_prompt(&translation.prompt)?;
     if !["disabled", "manual", "automatic"].contains(&translation.mode.as_str()) {
@@ -423,12 +432,14 @@ fn validate_translation(
         &translation.speaker_targets,
         profiles,
         translation.mode != "disabled",
+        live_translate && translation.mode == "automatic",
     )?;
     validate_translation_targets(
         "microphone",
         &translation.microphone_targets,
         profiles,
         translation.mode != "disabled",
+        live_translate && translation.mode == "automatic",
     )
 }
 
@@ -437,6 +448,7 @@ fn validate_translation_targets(
     targets: &[TranslationTargetConfig],
     profiles: &[ApiProfile],
     require_profile: bool,
+    live_translate: bool,
 ) -> Result<(), String> {
     if !(1..=3).contains(&targets.len()) {
         return Err(format!(
@@ -444,7 +456,7 @@ fn validate_translation_targets(
         ));
     }
     let mut languages = HashSet::new();
-    for target in targets {
+    for (index, target) in targets.iter().enumerate() {
         if !providers::is_valid_translation_language(&target.target_language) {
             return Err(format!(
                 "Invalid {source} translation target language: {}",
@@ -455,6 +467,10 @@ fn validate_translation_targets(
             return Err(format!(
                 "Translation {source} target languages must be unique"
             ));
+        }
+        if live_translate && index == 0 {
+            providers::validate_live_translation_language(&target.target_language)?;
+            continue;
         }
         let Some(profile_id) = target.profile_id.as_deref() else {
             if require_profile {
@@ -488,6 +504,7 @@ fn validate_translation_targets(
 fn validate_language_presets(
     presets: &[LanguagePreset],
     profiles: &[ApiProfile],
+    live_translate: bool,
 ) -> Result<(), String> {
     if presets.len() > 5 {
         return Err("Language presets cannot exceed 5 entries".into());
@@ -522,12 +539,14 @@ fn validate_language_presets(
             &preset.speaker_targets,
             profiles,
             preset.translation_mode != "disabled",
+            live_translate && preset.translation_mode == "automatic",
         )?;
         validate_translation_targets(
             "preset microphone",
             &preset.microphone_targets,
             profiles,
             preset.translation_mode != "disabled",
+            live_translate && preset.translation_mode == "automatic",
         )?;
         if !["preferred_only", "round_robin", "all_languages"]
             .contains(&preset.osc_translation_strategy.as_str())

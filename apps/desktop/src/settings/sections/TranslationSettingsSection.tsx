@@ -20,6 +20,7 @@ export function TranslationSettingsSection({ draft, apiProfiles, saveState, appl
   applySettings: ApplySettings;
 }) {
   const { t } = useTranslation();
+  const liveTranslate = draft.asr.backend === "gemini_live_translate";
   const translationProfiles = apiProfiles.filter(supportsTranslation);
   const preferred = draft.translation.speaker_targets[0];
   const enhancementProfile = translationProfiles.find(
@@ -51,8 +52,8 @@ export function TranslationSettingsSection({ draft, apiProfiles, saveState, appl
             <Select
               label={t("settings.translation.mode")}
               value={draft.translation.mode}
-              disabled={controlsDisabled || !translationProfiles.length}
-              helper={!translationProfiles.length ? t("settings.translation.noProfiles") : undefined}
+              disabled={controlsDisabled || (!liveTranslate && !translationProfiles.length)}
+              helper={!liveTranslate && !translationProfiles.length ? t("settings.translation.noProfiles") : undefined}
               options={["disabled", "manual", "automatic"].map((value) => ({
                 value,
                 label: t(`settings.translation.modes.${value}`),
@@ -76,6 +77,7 @@ export function TranslationSettingsSection({ draft, apiProfiles, saveState, appl
             <TranslationRouteList
               title={t("settings.translation.targetLanguageForSelf")}
               targets={draft.translation.microphone_targets}
+              liveTranslate={liveTranslate && draft.translation.mode === "automatic"}
               profiles={translationProfiles}
               disabled={controlsDisabled}
               onChange={(microphone_targets) => updateTranslation({
@@ -86,6 +88,7 @@ export function TranslationSettingsSection({ draft, apiProfiles, saveState, appl
             <TranslationRouteList
               title={t("settings.translation.targetLanguageForOtherParty")}
               targets={draft.translation.speaker_targets}
+              liveTranslate={liveTranslate && draft.translation.mode === "automatic"}
               profiles={translationProfiles}
               disabled={controlsDisabled}
               onChange={(speaker_targets) => updateTranslation({
@@ -101,7 +104,7 @@ export function TranslationSettingsSection({ draft, apiProfiles, saveState, appl
           </div>
         </div>
 
-        {enhancementProfile && supportsContext(enhancementProfile) && (
+        {!liveTranslate && enhancementProfile && supportsContext(enhancementProfile) && (
           <TranslationEnhancementSettings
             translation={draft.translation}
             preferredTarget={preferred?.target_language ?? "zh-Hans"}

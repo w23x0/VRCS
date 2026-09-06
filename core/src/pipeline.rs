@@ -174,6 +174,7 @@ impl TranscriptionPipeline {
         }
         let smart_turn = if vad_config.endpointing == "smart_turn"
             && asr_config.backend != crate::providers::SERVICE_FUN_ASR_REALTIME
+            && asr_config.backend != crate::providers::SERVICE_GEMINI_LIVE_TRANSLATE
         {
             match self.smart_turn_runtime.prepare().await {
                 Ok(()) => Some(self.smart_turn_runtime.clone()),
@@ -389,6 +390,8 @@ enum RecognitionBackend {
 }
 
 enum PipelineEffect {
+    PublishNativeTranslation(crate::asr::LiveTranslationResult),
+    PublishLiveTranslation(crate::models::LiveTranslation),
     PublishPartial {
         utterance_id: String,
         text: String,
@@ -459,14 +462,22 @@ fn reduce_pipeline_event(
             },
         ),
         PipelineEvent::SegmentEnded { segment, backend } => {
-            state.streaming = false;
+            state.streaming = matches!(
+                backend,
+                RecognitionBackend::Cloud(SegmentationMode::Continuous)
+            );
             match (backend, segment) {
                 (RecognitionBackend::Cloud(SegmentationMode::LocalCommit), segment) => {
                     vec![PipelineEffect::CommitCloud {
                         has_segment: segment.is_some(),
                     }]
                 }
-                (RecognitionBackend::Cloud(SegmentationMode::ServerVad), _) => Vec::new(),
+                (
+                    RecognitionBackend::Cloud(
+                        SegmentationMode::ServerVad | SegmentationMode::Continuous,
+                    ),
+                    _,
+                ) => Vec::new(),
                 (RecognitionBackend::Local, Some(segment)) => {
                     vec![PipelineEffect::TranscribeLocal(segment)]
                 }
@@ -489,6 +500,30 @@ fn reduce_cloud_event(
     echo_guard: &AsrEchoGuard,
 ) -> Vec<PipelineEffect> {
     match event {
+        CloudEvent::LiveTranslation {
+            snapshot,
+            completed,
+        } => {
+            let mut effects = Vec::new();
+            for result in completed {
+                if state
+                    .lifecycle
+                    .accept_final(&result.transcript.utterance_id)
+                {
+                    effects.push(PipelineEffect::PublishNativeTranslation(result));
+                }
+            }
+            if snapshot.text.is_empty() && snapshot.translation.is_empty() {
+                return effects;
+            }
+            if echo_guard.suppresses_partial(&snapshot.text)
+                || !state.lifecycle.accept_partial(&snapshot.utterance_id)
+            {
+                return effects;
+            }
+            effects.push(PipelineEffect::PublishLiveTranslation(snapshot));
+            effects
+        }
         CloudEvent::Partial {
             utterance_id,
             text,
@@ -646,6 +681,22 @@ impl PipelineEffectRunner<'_> {
         effect: PipelineEffect,
     ) -> Result<Option<PipelineEvent>, String> {
         match effect {
+            PipelineEffect::PublishNativeTranslation(result) => {
+                if self.echo_guard.is_echo(&result.transcript.text) {
+                    self.dependencies.cancel_recognition(
+                        &result.transcript.utterance_id,
+                        self.source,
+                        "filtered",
+                    );
+                } else {
+                    self.dependencies
+                        .publish_native_translation(self.source, result)
+                        .await?;
+                }
+            }
+            PipelineEffect::PublishLiveTranslation(snapshot) => self
+                .dependencies
+                .publish_live_translation(self.source, snapshot),
             PipelineEffect::PublishPartial {
                 utterance_id,
                 text,
@@ -1055,6 +1106,22 @@ mod tests {
     struct FakeEngine;
 
     #[test]
+    fn continuous_audio_does_not_commit_at_local_sentence_boundaries() {
+        let mut state = PipelineState::new(16_000);
+        state.streaming = true;
+        let effects = reduce_pipeline_event(
+            &mut state,
+            PipelineEvent::SegmentEnded {
+                segment: Some(vec![0.0; 1600]),
+                backend: RecognitionBackend::Cloud(SegmentationMode::Continuous),
+            },
+            &AsrEchoGuard::default(),
+        );
+        assert!(effects.is_empty());
+        assert!(state.streaming);
+    }
+
+    #[test]
     fn smart_turn_only_completes_on_a_positive_prediction() {
         assert!(smart_turn_should_complete(&Ok(0.75)));
         assert!(!smart_turn_should_complete(&Ok(COMPLETION_THRESHOLD)));
@@ -1263,7 +1330,7 @@ mod tests {
         ));
     }
 
-    fn test_dependencies(events: DomainEventHub) -> PipelineDependencies {
+    pub(super) fn test_dependencies(events: DomainEventHub) -> PipelineDependencies {
         let directory = tempfile::tempdir().unwrap();
         let db = Arc::new(Mutex::new(
             Database::open(&directory.path().join("test.db")).unwrap(),

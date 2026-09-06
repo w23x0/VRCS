@@ -31,7 +31,17 @@ use tokio_tungstenite::tungstenite::http::Request;
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct LiveTranslationResult {
+    pub transcript: crate::models::LiveTranslation,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum CloudEvent {
+    LiveTranslation {
+        snapshot: crate::models::LiveTranslation,
+        completed: Vec<LiveTranslationResult>,
+    },
     Partial {
         utterance_id: String,
         text: String,
@@ -91,17 +101,16 @@ impl StreamingSession {
     }
 
     pub async fn stop(self) {
-        let _ = self.stop.send(true);
-        let _ = self.task.await;
+        self.stop_and_drain().await;
     }
 
     pub async fn stop_and_drain(mut self) -> Vec<CloudEvent> {
         let _ = self.stop.send(true);
-        let _ = self.task.await;
         let mut drained = Vec::new();
-        while let Ok(event) = self.events.try_recv() {
+        while let Some(event) = self.events.recv().await {
             drained.push(event);
         }
+        let _ = self.task.await;
         drained
     }
 }
@@ -539,7 +548,13 @@ async fn finish(
     if let Some(message) = provider.finish_message(task_id) {
         let _ = socket.send(message).await;
     }
-    let deadline = tokio::time::sleep(Duration::from_secs(3));
+    let deadline = tokio::time::sleep(Duration::from_secs(
+        if provider == Provider::GeminiLiveTranslate {
+            5
+        } else {
+            3
+        },
+    ));
     tokio::pin!(deadline);
     loop {
         tokio::select! {
@@ -555,6 +570,9 @@ async fn finish(
                 }
             }
         }
+    }
+    if let Some(event) = provider.finish_translation(config, state) {
+        let _ = events.send(event).await;
     }
     let _ = socket.close(None).await;
 }
@@ -613,6 +631,37 @@ mod tests {
         } else {
             Message::Text(value.to_string().into())
         }
+    }
+
+    #[tokio::test]
+    async fn stop_drains_a_full_event_channel_before_joining() {
+        let (audio, _audio_rx) = mpsc::channel(1);
+        let (event_tx, events) = mpsc::channel(1);
+        let (stop, mut stop_rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            stop_rx.changed().await.unwrap();
+            for index in 0..64 {
+                event_tx
+                    .send(CloudEvent::Partial {
+                        utterance_id: index.to_string(),
+                        text: "tail".into(),
+                        language: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+        });
+        let session = StreamingSession {
+            audio,
+            events,
+            stop,
+            task,
+            segmentation_mode: SegmentationMode::Continuous,
+        };
+        let drained = tokio::time::timeout(Duration::from_secs(2), session.stop_and_drain())
+            .await
+            .unwrap();
+        assert_eq!(drained.len(), 64);
     }
 
     #[tokio::test]

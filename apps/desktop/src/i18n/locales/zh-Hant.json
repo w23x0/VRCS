@@ -700,6 +700,8 @@
         "clearComplete": "字幕記錄已清除，資料庫空間已回收。"
       },
       "translation": {
+        "liveTranslateHint": "每路音源使用 Live Translate 翻譯第一目標語言，需開啟自動翻譯。文字 Prompt、術語表和思考設定不適用。服務會產生譯後音訊並計費，但應用不播放。",
+        "liveTranslatePreview": "依句末標點依序配對並儲存原文和譯文，支援歷史紀錄、額外目標翻譯及 OSC。兩路文字的斷句不同時，配對可能存在偏差。",
         "title": "字幕翻譯",
 
         "mode": "翻譯方式",

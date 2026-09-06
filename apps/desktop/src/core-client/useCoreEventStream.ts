@@ -109,6 +109,9 @@ export function useCoreEventStream({
               catalog: message.catalog,
             });
             break;
+          case "live_translation_updated":
+            publishLivePartial({ ...message, type: "partial" });
+            break;
           case "partial":
             publishLivePartial(message);
             clearErrorFromRef.current(`stream:${message.source}`);

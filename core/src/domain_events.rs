@@ -6,12 +6,13 @@ use crate::chatbox::ChatboxMessage;
 use crate::models::{now_iso8601, Subtitle, SubtitleTranslation};
 
 pub const API_VERSION: &str = "1.0";
-pub const EVENT_TYPES: [&str; 10] = [
+pub const EVENT_TYPES: [&str; 11] = [
     "asr.partial",
     "asr.final",
     "asr.cancelled",
     "asr.reset",
     "asr.failed",
+    "translation.live_updated",
     "translation.started",
     "translation.partial",
     "translation.completed",
@@ -68,6 +69,15 @@ impl DomainEventHub {
 
     pub fn subscribe(&self) -> broadcast::Receiver<DomainEvent> {
         self.sender.subscribe()
+    }
+
+    pub fn live_translation(&self, source: &str, snapshot: &crate::models::LiveTranslation) {
+        self.publish(DomainEvent::new(
+            "translation.live_updated",
+            &snapshot.utterance_id,
+            source,
+            json!(snapshot),
+        ));
     }
 
     pub fn asr_partial(&self, message_id: &str, source: &str, text: &str, language: Option<&str>) {

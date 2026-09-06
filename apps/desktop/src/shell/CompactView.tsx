@@ -55,6 +55,7 @@ export function CompactView({ subtitles, subtitleLimit, selectionActive, running
             >
               {partial.text}
             </p>
+            {partial.translation && <p className="compact-translation" lang={contentLanguageTag(partial.target_language)}>{partial.translation}</p>}
           </div>
         )}
         {!partial && visibleSubtitles.length === 0 && (

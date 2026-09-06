@@ -106,6 +106,27 @@ impl HeadsetPresentation {
         config: &VrOverlayHeadsetConfig,
     ) {
         match event {
+            PresentationEvent::LiveTranslationUpdated { source, snapshot }
+                if config.show_partials
+                    && source_enabled(&source, config)
+                    && !self.terminated.contains(&source, &snapshot.utterance_id) =>
+            {
+                let mut item = item_from_partial(
+                    snapshot.utterance_id,
+                    source,
+                    snapshot.text,
+                    snapshot.language,
+                    expiry(now, config.display_seconds),
+                );
+                if config.show_translation_partials && !snapshot.translation.is_empty() {
+                    item.translations.push(PresentationTranslation {
+                        target_language: snapshot.target_language,
+                        text: snapshot.translation,
+                        preferred: true,
+                    });
+                }
+                self.partial = Some(item);
+            }
             PresentationEvent::RecognitionPartial {
                 utterance_id,
                 source,
@@ -247,6 +268,36 @@ pub struct WristPresentation {
 impl WristPresentation {
     pub fn apply(&mut self, event: PresentationEvent, now: Instant, config: &VrOverlayWristConfig) {
         match event {
+            PresentationEvent::LiveTranslationUpdated { source, snapshot }
+                if config.show_partials
+                    && source_enabled(&source, config)
+                    && !self.terminated.contains(&source, &snapshot.utterance_id) =>
+            {
+                let mut item = item_from_partial(
+                    snapshot.utterance_id,
+                    source,
+                    snapshot.text,
+                    snapshot.language,
+                    now,
+                );
+                if config.show_translation_partials && !snapshot.translation.is_empty() {
+                    item.translations.push(PresentationTranslation {
+                        target_language: snapshot.target_language,
+                        text: snapshot.translation,
+                        preferred: true,
+                    });
+                }
+                if let Some(existing) = self
+                    .partials
+                    .iter_mut()
+                    .find(|partial| partial.source == item.source)
+                {
+                    *existing = item;
+                } else {
+                    self.partials.push_back(item);
+                }
+                self.last_activity = Some(now);
+            }
             PresentationEvent::RecognitionPartial {
                 utterance_id,
                 source,

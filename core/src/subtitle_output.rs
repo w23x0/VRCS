@@ -8,6 +8,10 @@ use crate::osc::OscChatboxDispatcher;
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PresentationEvent {
+    LiveTranslationUpdated {
+        source: String,
+        snapshot: crate::models::LiveTranslation,
+    },
     RecognitionPartial {
         utterance_id: String,
         source: String,
@@ -117,6 +121,16 @@ impl SubtitleLifecyclePublisher {
 
     pub fn subscribe_subtitles(&self) -> broadcast::Receiver<Subtitle> {
         self.subtitles.subscribe()
+    }
+
+    pub fn live_translation(&self, source: &str, snapshot: crate::models::LiveTranslation) {
+        self.events.live_translation(source, &snapshot);
+        let _ = self
+            .presentation
+            .send(PresentationEvent::LiveTranslationUpdated {
+                source: source.into(),
+                snapshot,
+            });
     }
 
     pub fn subscribe_translations(&self) -> broadcast::Receiver<TranslationEvent> {

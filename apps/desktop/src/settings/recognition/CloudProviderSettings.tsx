@@ -157,8 +157,8 @@ export function CloudProviderSettings({
           />
         )}
         <RecognitionLanguageSelect
-          value={draft.asr.language}
-          disabled={disabled}
+          value={service?.id === "gemini_live_translate" ? "auto" : draft.asr.language}
+          disabled={disabled || service?.id === "gemini_live_translate"}
           onChange={(value) => onUpdateAsr("language", value)}
         />
         {service?.recognition_transport === "segmented_upload" && (
@@ -168,6 +168,7 @@ export function CloudProviderSettings({
             {!service.partial_results && <small>{t("settings.recognition.segmentedUpload.noPartial")}</small>}
           </div>
         )}
+        {service?.id === "gemini_live_translate" && <div className="cloud-transport-hint" role="note"><strong>Gemini Live Translate</strong><small>{t("settings.translation.liveTranslateHint")}</small><small>{t("settings.translation.liveTranslatePreview")}</small></div>}
         {selectedProfile && <small className="cloud-api-hint">{t("settings.recognition.selectedApiHint", { name: selectedProfile.name })}</small>}
       </div>
     </div>

@@ -24,6 +24,7 @@ struct TranslationJob {
     prompt: TranslationPromptConfig,
     profiles: Vec<ApiProfile>,
     include_vrcx_context: bool,
+    first_preferred: bool,
     queued_at: Instant,
 }
 
@@ -71,7 +72,8 @@ impl TranslationDispatcher {
                     let job = job.clone();
                     tokio::spawn(async move {
                         let _permit = permit;
-                        process_job(context, job, target, index == 0).await;
+                        let preferred = job.first_preferred && index == 0;
+                        process_job(context, job, target, preferred).await;
                     });
                 }
             }
@@ -79,6 +81,7 @@ impl TranslationDispatcher {
         Self { sender }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn enqueue(
         &self,
         subtitle: Subtitle,
@@ -87,6 +90,7 @@ impl TranslationDispatcher {
         profiles: Vec<ApiProfile>,
         message_id: String,
         include_vrcx_context: bool,
+        first_preferred: bool,
     ) -> Result<(), String> {
         self.sender
             .try_send(TranslationJob {
@@ -96,6 +100,7 @@ impl TranslationDispatcher {
                 prompt,
                 profiles,
                 include_vrcx_context,
+                first_preferred,
                 queued_at: Instant::now(),
             })
             .map_err(|_| "Translation queue is full".to_string())

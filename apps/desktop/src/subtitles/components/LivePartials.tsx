@@ -18,7 +18,11 @@ export function LivePartials() {
   }
   return partials.map((partial) => (
     <div className={`message-group source-${partial.source} streaming-message`} key={`${partial.source}-${partial.utterance_id}`}>
-      <div className="bubble" lang={contentLanguageTag(partial.language)}>{partial.text}<span className="streaming-ellipsis" aria-hidden="true">…</span></div>
+      <div className="bubble">
+        {partial.text && <p className="bubble-original" lang={contentLanguageTag(partial.language)}>{partial.text}<span className="streaming-ellipsis" aria-hidden="true">…</span></p>}
+        {partial.text && partial.translation && <div className="bubble-translation-divider" aria-hidden="true" />}
+        {partial.translation && <p className="bubble-translation streaming-translation" lang={contentLanguageTag(partial.target_language)}>{partial.translation}<span className="streaming-ellipsis" aria-hidden="true">…</span></p>}
+      </div>
     </div>
   ));
 }

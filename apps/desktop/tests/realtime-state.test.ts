@@ -60,3 +60,15 @@ test("resetting one source permits an identifier in a new session", () => {
   assert.equal(getLivePartial("speaker")?.text, "new session");
   clearLivePartials();
 });
+
+test("native translation can arrive first and clears with its session", () => {
+  clearLivePartials();
+  publishLivePartial({ ...partial("native-1", ""), translation: "你好", target_language: "zh-Hans" });
+  assert.equal(getLivePartial("speaker")?.translation, "你好");
+  publishLivePartial({ ...partial("native-1", "hello"), translation: "你好", target_language: "zh-Hans" });
+  assert.equal(getLivePartial("speaker")?.text, "hello");
+  completeLivePartial("speaker", "native-1");
+  publishLivePartial({ ...partial("native-1", "late"), translation: "迟到" });
+  assert.equal(getLivePartial("speaker"), null);
+  clearLivePartials();
+});

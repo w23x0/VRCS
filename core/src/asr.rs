@@ -25,7 +25,8 @@ pub use session::{
     CloudRecognitionSession,
 };
 pub use streaming::{
-    streaming_test_backend, test_streaming_connection, CloudEvent, SegmentationMode,
+    streaming_test_backend, test_streaming_connection, CloudEvent, LiveTranslationResult,
+    SegmentationMode,
 };
 
 use crate::config::AsrConfig;

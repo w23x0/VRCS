@@ -6,7 +6,7 @@ use crate::asr::AsrService;
 use crate::config::{AppConfig, TranslationConfig};
 use crate::db::conversations::{publish_latest_catalog, ConversationCatalog};
 use crate::db::Database;
-use crate::models::{now_iso8601, LiveTranscription, Subtitle};
+use crate::models::{now_iso8601, LiveTranscription, Subtitle, SubtitleTranslation};
 use crate::subtitle_output::{SubtitleLifecyclePublisher, TranslationFailure};
 use crate::translation::{same_translation_language, TranslationDispatcher};
 
@@ -44,6 +44,14 @@ impl PipelineDependencies {
             language_session,
             output,
         }
+    }
+
+    pub(crate) fn publish_live_translation(
+        &self,
+        source: &str,
+        snapshot: crate::models::LiveTranslation,
+    ) {
+        self.output.live_translation(source, snapshot);
     }
 
     pub(crate) fn publish_live(&self, event: LiveTranscription) {
@@ -140,6 +148,42 @@ impl PipelineDependencies {
         source: &'static str,
         message_id: String,
     ) -> Result<(), String> {
+        self.publish_text_with_translation(text, language, source, message_id, None)
+            .await
+    }
+
+    pub(crate) async fn publish_native_translation(
+        &self,
+        source: &'static str,
+        result: crate::asr::LiveTranslationResult,
+    ) -> Result<(), String> {
+        let transcript = result.transcript;
+        let translation = SubtitleTranslation {
+            text: transcript.translation.trim().to_owned(),
+            source_language: transcript.language.clone(),
+            target_language: transcript.target_language,
+            provider: crate::providers::GEMINI_PROVIDER.into(),
+            model: Some(result.model),
+            created_at: now_iso8601(),
+        };
+        self.publish_text_with_translation(
+            transcript.text,
+            transcript.language,
+            source,
+            transcript.utterance_id,
+            Some(translation),
+        )
+        .await
+    }
+
+    async fn publish_text_with_translation(
+        &self,
+        text: String,
+        language: Option<String>,
+        source: &'static str,
+        message_id: String,
+        native: Option<SubtitleTranslation>,
+    ) -> Result<(), String> {
         let text = text.trim().to_string();
         if text.is_empty() {
             self.output.asr_cancelled(&message_id, source, "empty");
@@ -158,15 +202,26 @@ impl PipelineDependencies {
         };
         let database = Arc::clone(&self.database);
         let conversation_catalog = self.conversation_catalog.clone();
-        let saved = match tokio::task::spawn_blocking(move || {
+        let native_record = native
+            .clone()
+            .filter(|translation| !translation.text.is_empty());
+        let (saved, native_error) = match tokio::task::spawn_blocking(move || {
             let database = database
                 .lock()
                 .map_err(|_| "Database lock is unavailable".to_string())?;
-            let saved = database
+            let mut saved = database
                 .add_subtitle(&subtitle)
                 .map_err(|error| error.to_string())?;
+            let mut native_error = None;
+            if let Some(translation) = native_record {
+                match database.save_translation(saved.id.expect("saved subtitle id"), &translation)
+                {
+                    Ok(_) => saved.translations.push(translation),
+                    Err(error) => native_error = Some(error.to_string()),
+                }
+            }
             publish_latest_catalog(&database, &conversation_catalog);
-            Ok::<_, String>(saved)
+            Ok::<_, String>((saved, native_error))
         })
         .await
         {
@@ -183,7 +238,7 @@ impl PipelineDependencies {
                 return Err(detail);
             }
         };
-        let (translation_targets, translation_prompt, api_profiles, include_vrcx_context) = {
+        let (mut translation_targets, translation_prompt, api_profiles, include_vrcx_context) = {
             let config = self.config.read().expect("config lock");
             let language = self
                 .language_session
@@ -201,21 +256,69 @@ impl PipelineDependencies {
                 config.vrcx.enabled && config.vrcx.include_in_llm_context,
             )
         };
+        if let (Some(targets), Some(native)) = (&mut translation_targets, &native) {
+            targets.retain(|target| target.target_language != native.target_language);
+        }
+        let mut output_targets = translation_targets
+            .as_ref()
+            .map(|targets| {
+                targets
+                    .iter()
+                    .map(|target| target.target_language.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Some(native) = &native {
+            if !native.text.is_empty() {
+                output_targets.insert(0, native.target_language.clone());
+            }
+        }
         self.output.subtitle_stored_with_message(
             saved.clone(),
-            translation_targets.is_some(),
-            translation_targets
-                .as_ref()
-                .map(|targets| {
-                    targets
-                        .iter()
-                        .map(|target| target.target_language.clone())
-                        .collect()
-                })
-                .unwrap_or_default(),
+            !output_targets.is_empty(),
+            output_targets,
             &message_id,
         );
+        if let Some(native) = &native {
+            if let Some(detail) = native_error {
+                self.output
+                    .translation_failed_with_message(TranslationFailure {
+                        subtitle_id: saved.id.unwrap(),
+                        code: "translation.storage_failed".into(),
+                        detail,
+                        target_language: &native.target_language,
+                        preferred: true,
+                        message_id: &message_id,
+                        source,
+                    });
+            } else if !native.text.is_empty() {
+                self.output.translation_completed_with_message(
+                    saved.id.unwrap(),
+                    native.clone(),
+                    true,
+                    &message_id,
+                    source,
+                );
+            } else if !saved.language.as_deref().is_some_and(|language| {
+                same_translation_language(language, &native.target_language)
+            }) {
+                self.output
+                    .translation_failed_with_message(TranslationFailure {
+                        subtitle_id: saved.id.unwrap(),
+                        code: "translation.live_incomplete".into(),
+                        detail: "Live translation ended before the translated sentence arrived"
+                            .into(),
+                        target_language: &native.target_language,
+                        preferred: true,
+                        message_id: &message_id,
+                        source,
+                    });
+            }
+        }
         if let Some(targets) = translation_targets {
+            if targets.is_empty() {
+                return Ok(());
+            }
             let failed_targets = targets.clone();
             if let Err(detail) = self.translation.enqueue(
                 saved.clone(),
@@ -224,6 +327,7 @@ impl PipelineDependencies {
                 api_profiles,
                 message_id.clone(),
                 include_vrcx_context,
+                native.is_none(),
             ) {
                 if let Some(subtitle_id) = saved.id {
                     for (index, target) in failed_targets.iter().enumerate() {
@@ -233,7 +337,7 @@ impl PipelineDependencies {
                                 code: "translation.queue_full".into(),
                                 detail: detail.clone(),
                                 target_language: &target.target_language,
-                                preferred: index == 0,
+                                preferred: native.is_none() && index == 0,
                                 message_id: &message_id,
                                 source,
                             });
@@ -274,6 +378,145 @@ fn automatic_translation_targets(
 mod tests {
     use super::automatic_translation_targets;
     use crate::config::{TranslationConfig, TranslationTargetConfig};
+
+    fn native_result() -> crate::asr::LiveTranslationResult {
+        crate::asr::LiveTranslationResult {
+            transcript: crate::models::LiveTranslation {
+                utterance_id: "native-1".into(),
+                text: "Hello.".into(),
+                language: Some("en".into()),
+                translation: "你好。".into(),
+                target_language: "zh-Hans".into(),
+            },
+            model: "gemini-3.5-live-translate-preview".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn native_translation_is_stored_and_extra_targets_are_not_preferred() {
+        let events = crate::domain_events::DomainEventHub::new();
+        let dependencies = super::super::tests::test_dependencies(events);
+        let mut presentation = dependencies.output.subscribe_presentation_events();
+        let mut translation_events = dependencies.output.subscribe_translations();
+        {
+            let mut config = dependencies.config.write().unwrap();
+            config.translation.mode = "automatic".into();
+            config.translation.speaker_targets = vec![
+                TranslationTargetConfig::new("zh-Hans"),
+                TranslationTargetConfig::new("ja"),
+            ];
+        }
+        dependencies
+            .publish_native_translation("speaker", native_result())
+            .await
+            .unwrap();
+        let history = dependencies
+            .database
+            .lock()
+            .unwrap()
+            .subtitle_history(10)
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].text, "Hello.");
+        assert_eq!(history[0].translations.len(), 1);
+        assert_eq!(history[0].translations[0].text, "你好。");
+        assert_eq!(history[0].translations[0].provider, "gemini");
+        assert_eq!(
+            history[0].translations[0].model.as_deref(),
+            Some("gemini-3.5-live-translate-preview")
+        );
+        assert!(matches!(presentation.try_recv().unwrap(),
+            crate::subtitle_output::PresentationEvent::Final { subtitle, .. }
+                if subtitle.translations.len() == 1));
+        assert!(matches!(
+            translation_events.recv().await.unwrap(),
+            crate::subtitle_output::TranslationEvent::TranslationCompleted {
+                preferred: true,
+                ..
+            }
+        ));
+        let event =
+            tokio::time::timeout(std::time::Duration::from_secs(2), translation_events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(matches!(event,
+            crate::subtitle_output::TranslationEvent::TranslationStarted { target_language, preferred: false, .. }
+                if target_language == "ja"));
+    }
+
+    #[tokio::test]
+    async fn failed_native_translation_storage_preserves_source_without_success_event() {
+        let events = crate::domain_events::DomainEventHub::new();
+        let dependencies = super::super::tests::test_dependencies(events);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("storage-failure.db");
+        *dependencies.database.lock().unwrap() = crate::db::Database::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_translation BEFORE INSERT ON subtitle_translations BEGIN SELECT RAISE(FAIL, 'test storage failure'); END;").unwrap();
+        let mut translations = dependencies.output.subscribe_translations();
+        dependencies
+            .publish_native_translation("speaker", native_result())
+            .await
+            .unwrap();
+        let history = dependencies
+            .database
+            .lock()
+            .unwrap()
+            .subtitle_history(10)
+            .unwrap();
+        assert_eq!(history[0].text, "Hello.");
+        assert!(history[0].translations.is_empty());
+        assert!(matches!(translations.try_recv().unwrap(),
+            crate::subtitle_output::TranslationEvent::TranslationFailed { code, .. }
+                if code == "translation.storage_failed"));
+        assert!(translations.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn native_only_does_not_enqueue_llm_and_missing_translation_keeps_source() {
+        let events = crate::domain_events::DomainEventHub::new();
+        let dependencies = super::super::tests::test_dependencies(events);
+        let mut translations = dependencies.output.subscribe_translations();
+        {
+            let mut config = dependencies.config.write().unwrap();
+            config.translation.mode = "automatic".into();
+            config.translation.microphone_targets = vec![TranslationTargetConfig::new("zh-Hans")];
+        }
+        dependencies
+            .publish_native_translation("microphone", native_result())
+            .await
+            .unwrap();
+        assert!(matches!(
+            translations.try_recv().unwrap(),
+            crate::subtitle_output::TranslationEvent::TranslationCompleted { .. }
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), translations.recv())
+                .await
+                .is_err()
+        );
+        let mut missing = native_result();
+        missing.transcript.utterance_id = "native-2".into();
+        missing.transcript.translation.clear();
+        dependencies
+            .publish_native_translation("microphone", missing)
+            .await
+            .unwrap();
+        let history = dependencies
+            .database
+            .lock()
+            .unwrap()
+            .subtitle_history(10)
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].source, "microphone");
+        assert_eq!(history[0].text, "Hello.");
+        assert!(history[0].translations.is_empty());
+        assert!(matches!(translations.try_recv().unwrap(),
+            crate::subtitle_output::TranslationEvent::TranslationFailed { code, .. }
+                if code == "translation.live_incomplete"));
+    }
 
     #[test]
     fn automatic_mode_translates_microphone_with_its_own_target() {

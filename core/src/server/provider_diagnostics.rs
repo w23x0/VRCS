@@ -80,7 +80,21 @@ pub(super) async fn credential_test(
 
     match capability {
         CAPABILITY_SPEECH_TO_TEXT => {
-            test_recognition_service(&config.asr, profile, service).await?;
+            let mut asr_config = config.asr.clone();
+            if service.id == providers::SERVICE_GEMINI_LIVE_TRANSLATE {
+                let language = state
+                    .config
+                    .language_session
+                    .read()
+                    .expect("language session lock")
+                    .resolve(&config);
+                asr_config.live_translation_target = language
+                    .translation
+                    .speaker_targets
+                    .first()
+                    .map(|t| t.target_language.clone());
+            }
+            test_recognition_service(&asr_config, profile, service).await?;
         }
         CAPABILITY_TEXT_GENERATION => {
             if matches!(
@@ -114,7 +128,8 @@ async fn test_recognition_service(
         | ServiceAdapter::AlibabaTokenPlanRealtime
         | ServiceAdapter::FunAsrRealtime
         | ServiceAdapter::OpenAiRealtime
-        | ServiceAdapter::GeminiTranscribe => {
+        | ServiceAdapter::GeminiTranscribe
+        | ServiceAdapter::GeminiLiveTranslate => {
             asr::streaming_test_backend(config, &profile.id, Some(service.id)).map_err(
                 |error| {
                     api_error(

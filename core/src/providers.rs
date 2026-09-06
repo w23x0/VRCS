@@ -33,6 +33,18 @@ pub const SERVICE_TOKEN_PLAN_REALTIME: &str = "token_plan_realtime";
 pub const SERVICE_OPENAI_REALTIME: &str = "openai_realtime";
 pub const SERVICE_GROQ_TRANSCRIPTION: &str = "groq_transcription";
 pub const SERVICE_GEMINI_TRANSCRIBE: &str = "gemini_transcribe";
+pub const SERVICE_GEMINI_LIVE_TRANSLATE: &str = "gemini_live_translate";
+
+pub fn validate_live_translation_language(language: &str) -> Result<(), String> {
+    const LANGUAGES: &str = "af ak sq am ar hy az eu be bn bg my ca zh-Hans zh-Hant hr cs da en et fil fi fr gl ka de el gu ha he hi hu is id it ja jv kn kk km ko lo lv lt lb mk ms ml mr mn ne no nb fa pl pt-BR pt-PT pa ro ru sr sd si sk sl es su sw sv ta te th tr uk ur uz vi zu";
+    if LANGUAGES.split_whitespace().any(|code| code == language) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Unsupported Gemini Live Translate target language: {language}"
+        ))
+    }
+}
 
 pub const LLM_TRANSLATION_LANGUAGES: &[&str] = &[
     "zh-Hans", "zh-Hant", "yue-Hant", "en", "ja", "ko", "es", "fr", "de", "ru", "ar", "bg", "cs",
@@ -134,6 +146,7 @@ pub enum ServiceAdapter {
     FunAsrRealtime,
     OpenAiRealtime,
     GeminiTranscribe,
+    GeminiLiveTranslate,
     OpenAiAudioTranscriptions,
 }
 
@@ -293,6 +306,18 @@ const GEMINI_SERVICES: &[ProviderServiceDefinition] = &[
             partial_results: true,
             models: GEMINI_ASR_MODELS,
             context_max_chars: Some(4_000),
+            support: SupportLevel::Native,
+        },
+    ),
+    recognition_service_definition(
+        SERVICE_GEMINI_LIVE_TRANSLATE,
+        "Gemini Live Translate (Preview)",
+        ServiceAdapter::GeminiLiveTranslate,
+        RecognitionServiceSpec {
+            transport: RecognitionTransport::RealtimeStream,
+            partial_results: true,
+            models: &["gemini-3.5-live-translate-preview"],
+            context_max_chars: None,
             support: SupportLevel::Native,
         },
     ),
@@ -1090,7 +1115,7 @@ pub fn translation_language_name(language: &str) -> Option<&'static str> {
         "id" => "Indonesian",
         "it" => "Italian",
         "ms" => "Malay",
-        "nb" => "Norwegian Bokmål",
+        "nb" => "Norwegian Bokm姘搇",
         "nl" => "Dutch",
         "pl" => "Polish",
         "pt-BR" => "Portuguese (Brazil)",
@@ -1144,7 +1169,7 @@ mod tests {
     fn gemini_catalog_exposes_transcription_under_the_existing_provider() {
         let gemini = definition(GEMINI_PROVIDER).unwrap();
         assert_eq!(gemini.display_name, "Gemini");
-        assert_eq!(gemini.services.len(), 2);
+        assert_eq!(gemini.services.len(), 3);
         assert_eq!(gemini.purposes, SHARED_PURPOSES);
 
         let transcription = service(GEMINI_PROVIDER, SERVICE_GEMINI_TRANSCRIBE).unwrap();

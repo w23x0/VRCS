@@ -13,6 +13,8 @@ export interface LiveTranscription {
   source: "speaker" | "microphone";
   text: string;
   language?: string | null;
+  translation?: string;
+  target_language?: string;
 }
 
 export interface AudioLevel {

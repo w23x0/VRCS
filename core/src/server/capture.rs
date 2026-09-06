@@ -25,12 +25,26 @@ impl CaptureReloadPlan {
             || asr_runtime_changed(current, candidate)
             || glossary_asr_runtime_changed(current, candidate)
             || current.storage.model_directory != candidate.storage.model_directory;
+        let live = current.asr.backend == crate::providers::SERVICE_GEMINI_LIVE_TRANSLATE
+            || candidate.asr.backend == crate::providers::SERVICE_GEMINI_LIVE_TRANSLATE;
+        let live_mode_changed = live && current.translation.mode != candidate.translation.mode;
+        let target = |targets: &[crate::config::TranslationTargetConfig]| {
+            targets.first().map(|t| t.target_language.clone())
+        };
         let sample_rate_changed = current.audio.sample_rate != candidate.audio.sample_rate;
         Self {
             speaker: shared
+                || live_mode_changed
+                || (live
+                    && target(&current.translation.speaker_targets)
+                        != target(&candidate.translation.speaker_targets))
                 || sample_rate_changed
                 || current.audio.output != candidate.audio.output,
             microphone: shared
+                || live_mode_changed
+                || (live
+                    && target(&current.translation.microphone_targets)
+                        != target(&candidate.translation.microphone_targets))
                 || sample_rate_changed
                 || current.audio.microphone != candidate.audio.microphone,
         }
@@ -202,6 +216,27 @@ pub(crate) async fn validate_capture_config(
             "At least one audio source must be enabled",
         ));
     }
+    if config.asr.backend == crate::providers::SERVICE_GEMINI_LIVE_TRANSLATE {
+        if config.translation.mode != "automatic" || config.asr.cloud_failure_policy != "reconnect"
+        {
+            return Err(api_error(StatusCode::CONFLICT, "asr.live_translation_config", "Gemini Live Translate requires automatic translation and reconnect failure handling"));
+        }
+        for targets in [
+            &config.translation.speaker_targets,
+            &config.translation.microphone_targets,
+        ] {
+            let target = targets.first().ok_or_else(|| {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "asr.live_translation_config",
+                    "Select a translation target",
+                )
+            })?;
+            crate::providers::validate_live_translation_language(&target.target_language).map_err(
+                |error| api_error(StatusCode::CONFLICT, "asr.live_translation_config", error),
+            )?;
+        }
+    }
     if config.asr.backend != "local_whisper" {
         crate::asr::validate_cloud_connection(&config.asr)
             .map_err(|error| api_error(StatusCode::CONFLICT, "asr.cloud_profile_invalid", error))?;
@@ -243,8 +278,20 @@ pub(crate) async fn validate_capture_config(
     Ok(())
 }
 
-fn effective_asr_config(state: &CaptureContext, config: &AppConfig) -> (AsrConfig, AsrEchoGuard) {
+fn effective_asr_config(
+    state: &CaptureContext,
+    config: &AppConfig,
+    source: &str,
+) -> (AsrConfig, AsrEchoGuard) {
     let mut asr = config.asr.clone();
+    if asr.backend == crate::providers::SERVICE_GEMINI_LIVE_TRANSLATE {
+        let targets = if source == "microphone" {
+            &config.translation.microphone_targets
+        } else {
+            &config.translation.speaker_targets
+        };
+        asr.live_translation_target = targets.first().map(|target| target.target_language.clone());
+    }
     let terms = state
         .content
         .glossary
@@ -285,7 +332,7 @@ async fn start_speaker_pipeline(
         .then_some(output.device_id)
         .flatten();
     let process_name = (output.mode == "vrchat").then_some("VRChat.exe");
-    let (asr, echo_guard) = effective_asr_config(state, config);
+    let (asr, echo_guard) = effective_asr_config(state, config, "speaker");
     state
         .capture
         .speaker_pipeline
@@ -324,7 +371,7 @@ async fn start_microphone_pipeline(
     let microphone_id = (config.audio.microphone.mode == "device")
         .then_some(config.audio.microphone.device_id)
         .flatten();
-    let (asr, echo_guard) = effective_asr_config(state, config);
+    let (asr, echo_guard) = effective_asr_config(state, config, "microphone");
     state
         .capture
         .microphone_pipeline
@@ -521,7 +568,7 @@ pub(crate) async fn resume_microphone(state: &CaptureContext) -> Result<(), Stri
         .then_some(config.audio.microphone.device_id)
         .flatten();
     let dependencies = pipeline_dependencies(state);
-    let (asr, echo_guard) = effective_asr_config(state, &config);
+    let (asr, echo_guard) = effective_asr_config(state, &config, "microphone");
     state
         .capture
         .microphone_pipeline
@@ -545,6 +592,21 @@ pub(crate) async fn resume_microphone(state: &CaptureContext) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::{asr_runtime_changed, CaptureReloadPlan};
+
+    #[test]
+    fn live_translation_restarts_only_the_changed_audio_target() {
+        let mut current = crate::config::AppConfig::default();
+        current.asr.backend = crate::providers::SERVICE_GEMINI_LIVE_TRANSLATE.into();
+        let mut next = current.clone();
+        next.translation.speaker_targets[0].target_language = "ja".into();
+        let plan = CaptureReloadPlan::between(&current, &next);
+        assert!(plan.speaker);
+        assert!(!plan.microphone);
+        next = current.clone();
+        next.translation.speaker_targets[0].model = "another-text-model".into();
+        assert!(CaptureReloadPlan::between(&current, &next).is_empty());
+    }
+
     use crate::config::{AppConfig, GlossarySource};
     use crate::providers::{
         CAPABILITY_SPEECH_TO_TEXT, SERVICE_GROQ_TRANSCRIPTION, SERVICE_OPENAI_REALTIME,

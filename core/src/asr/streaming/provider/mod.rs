@@ -1,5 +1,6 @@
 mod fun_asr;
 mod gemini;
+mod gemini_live_translate;
 mod openai;
 mod qwen;
 
@@ -24,6 +25,7 @@ pub(super) struct NormalizationState {
     pub(super) transcripts: HashMap<String, String>,
     fallback_id: Option<String>,
     snapshot_id: Option<String>,
+    live_translation: gemini_live_translate::State,
 }
 
 impl NormalizationState {
@@ -121,12 +123,14 @@ pub(super) enum Provider {
     FunAsr,
     OpenAi,
     Gemini,
+    GeminiLiveTranslate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SegmentationMode {
     LocalCommit,
     ServerVad,
+    Continuous,
 }
 
 pub(super) enum InitializationEvent {
@@ -136,6 +140,17 @@ pub(super) enum InitializationEvent {
 }
 
 impl Provider {
+    pub(super) fn finish_translation(
+        self,
+        config: &AsrConfig,
+        state: &mut NormalizationState,
+    ) -> Option<CloudEvent> {
+        if self == Self::GeminiLiveTranslate {
+            gemini_live_translate::finish(config, &mut state.live_translation)
+        } else {
+            None
+        }
+    }
     pub(super) fn from_config(config: &AsrConfig) -> Result<Self, String> {
         Self::from_service(&config.backend)
     }
@@ -154,6 +169,7 @@ impl Provider {
             ServiceAdapter::FunAsrRealtime => Ok(Self::FunAsr),
             ServiceAdapter::OpenAiRealtime => Ok(Self::OpenAi),
             ServiceAdapter::GeminiTranscribe => Ok(Self::Gemini),
+            ServiceAdapter::GeminiLiveTranslate => Ok(Self::GeminiLiveTranslate),
             _ => Err(format!(
                 "Service {service_id} does not have a realtime recognition adapter"
             )),
@@ -171,7 +187,7 @@ impl Provider {
             Self::TokenPlan => qwen::build_token_plan_request(config, key),
             Self::FunAsr => fun_asr::build_request(profile, key),
             Self::OpenAi => openai::build_request(key),
-            Self::Gemini => gemini::build_request(key),
+            Self::Gemini | Self::GeminiLiveTranslate => gemini::build_request(key),
         }
     }
 
@@ -185,6 +201,7 @@ impl Provider {
                 SegmentationMode::LocalCommit
             }
             Self::FunAsr => SegmentationMode::ServerVad,
+            Self::GeminiLiveTranslate => SegmentationMode::Continuous,
         }
     }
 
@@ -204,6 +221,7 @@ impl Provider {
             ),
             Self::OpenAi => openai::session_update(config),
             Self::Gemini => gemini::setup(config),
+            Self::GeminiLiveTranslate => gemini_live_translate::setup(config),
         }
     }
 
@@ -233,7 +251,7 @@ impl Provider {
                 ),
                 _ => InitializationEvent::Pending,
             },
-            Self::Gemini => gemini::initialization_event(value),
+            Self::Gemini | Self::GeminiLiveTranslate => gemini::initialization_event(value),
         }
     }
 
@@ -248,6 +266,9 @@ impl Provider {
             Self::FunAsr => fun_asr::normalize_event(config, value, state),
             Self::OpenAi => openai::normalize_event(config, value, state),
             Self::Gemini => gemini::normalize_event(config, value, state),
+            Self::GeminiLiveTranslate => {
+                gemini_live_translate::normalize_event(config, value, &mut state.live_translation)
+            }
         }
     }
 
@@ -256,7 +277,7 @@ impl Provider {
             Self::Qwen | Self::TokenPlan => qwen::audio_message(samples),
             Self::FunAsr => fun_asr::audio_message(samples),
             Self::OpenAi => openai::audio_message(samples),
-            Self::Gemini => gemini::audio_message(samples),
+            Self::Gemini | Self::GeminiLiveTranslate => gemini::audio_message(samples),
         }
     }
 
@@ -265,7 +286,7 @@ impl Provider {
             Self::Qwen | Self::TokenPlan => Some(qwen::commit_message()),
             Self::OpenAi => Some(openai::commit_message()),
             Self::Gemini => Some(gemini::commit_message()),
-            Self::FunAsr => None,
+            Self::FunAsr | Self::GeminiLiveTranslate => None,
         }
     }
 
@@ -278,6 +299,7 @@ impl Provider {
             )),
             Self::OpenAi => None,
             Self::Gemini => None,
+            Self::GeminiLiveTranslate => Some(gemini::commit_message()),
         }
     }
 
@@ -289,12 +311,12 @@ impl Provider {
                 value.pointer("/header/event").and_then(Value::as_str) == Some("task-finished")
             }
             Self::OpenAi => false,
-            Self::Gemini => false,
+            Self::Gemini | Self::GeminiLiveTranslate => false,
         }
     }
 
     pub(super) fn connection_error(self, error: impl std::fmt::Display) -> String {
-        if self == Self::Gemini {
+        if matches!(self, Self::Gemini | Self::GeminiLiveTranslate) {
             "Failed to connect to Gemini transcription service".into()
         } else {
             format!("Failed to connect to cloud recognition service: {error}")

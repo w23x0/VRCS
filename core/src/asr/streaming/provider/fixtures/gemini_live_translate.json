@@ -1,0 +1,146 @@
+[
+  {
+    "serverContent": {
+      "inputTranscription": {
+        "text": "Hello. I am",
+        "languageCode": "en"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "outputTranscription": {
+        "text": "你好。",
+        "languageCode": "zh-Hans"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "inputTranscription": {
+        "text": " testing live",
+        "languageCode": "en"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "outputTranscription": {
+        "text": "我正在测试",
+        "languageCode": "zh-Hans"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "inputTranscription": {
+        "text": " translation.",
+        "languageCode": "en"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "outputTranscription": {
+        "text": "实时翻译。",
+        "languageCode": "zh-Hans"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "inputTranscription": {
+        "text": " The",
+        "languageCode": "en"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "outputTranscription": {
+        "text": "网站",
+        "languageCode": "zh-Hans"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "inputTranscription": {
+        "text": " weather is sunny",
+        "languageCode": "en"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "outputTranscription": {
+        "text": "今天天气",
+        "languageCode": "zh-Hans"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "inputTranscription": {
+        "text": " today.",
+        "languageCode": "en"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "outputTranscription": {
+        "text": "晴朗。",
+        "languageCode": "zh-Hans"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "inputTranscription": {
+        "text": " I would like",
+        "languageCode": "en"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "outputTranscription": {
+        "text": "我想要",
+        "languageCode": "zh-Hans"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "inputTranscription": {
+        "text": " a cup of tea.",
+        "languageCode": "en"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "outputTranscription": {
+        "text": "一杯茶。",
+        "languageCode": "zh-Hans"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "inputTranscription": {
+        "text": " Please.",
+        "languageCode": "en"
+      }
+    }
+  },
+  {
+    "serverContent": {
+      "outputTranscription": {
+        "text": "谢谢。",
+        "languageCode": "zh-Hans"
+      }
+    }
+  }
+]

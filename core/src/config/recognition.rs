@@ -25,6 +25,9 @@ pub struct AsrConfig {
     pub service_settings: BTreeMap<String, RecognitionServiceSettings>,
     #[serde(default = "default_cloud_failure_policy")]
     pub cloud_failure_policy: String,
+    /// Resolved per audio source; never persisted.
+    #[serde(skip)]
+    pub live_translation_target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,6 +74,13 @@ fn default_cloud_failure_policy() -> String {
 
 pub fn default_service_settings() -> BTreeMap<String, RecognitionServiceSettings> {
     [
+        (
+            crate::providers::SERVICE_GEMINI_LIVE_TRANSLATE,
+            RecognitionServiceSettings {
+                model: "gemini-3.5-live-translate-preview".into(),
+                context: String::new(),
+            },
+        ),
         (
             SERVICE_QWEN_REALTIME,
             RecognitionServiceSettings {
@@ -129,6 +139,7 @@ impl Default for AsrConfig {
             active_profile_id: None,
             service_settings: default_service_settings(),
             cloud_failure_policy: default_cloud_failure_policy(),
+            live_translation_target: None,
         }
     }
 }

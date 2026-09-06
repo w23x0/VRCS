@@ -39,6 +39,7 @@ export interface ConversationCatalogEvent {
 export type SubtitleStreamMessage =
   | { type: "subtitle"; subtitle: Subtitle; utterance_id?: string }
   | { type: "conversation_catalog"; catalog: ConversationCatalog }
+  | (Omit<LiveTranscription, "type"> & { type: "live_translation_updated"; translation: string; target_language: string })
   | LiveTranscription
   | AudioLevel
   | { type: "vrchat_mute_status"; status: VrchatMuteStatus }
@@ -204,6 +205,10 @@ export function parseSubtitleStreamMessage(
       return isConversationCatalog(value.catalog)
         ? { type: "conversation_catalog", catalog: value.catalog }
         : null;
+    case "live_translation_updated":
+      return isSource(value.source) && isText(value.utterance_id) && isText(value.text)
+        && isText(value.translation) && isText(value.target_language) && isNullableText(value.language)
+        ? value as SubtitleStreamMessage : null;
     case "partial":
       return isSource(value.source)
         && isText(value.text)

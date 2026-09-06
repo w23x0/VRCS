@@ -190,6 +190,16 @@ fn validate_optional_text(label: &str, value: Option<&str>, maximum: usize) -> R
     Ok(())
 }
 
+/// A display snapshot. It is not evidence of sentence alignment.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct LiveTranslation {
+    pub utterance_id: String,
+    pub text: String,
+    pub language: Option<String>,
+    pub translation: String,
+    pub target_language: String,
+}
+
 pub fn now_iso8601() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }

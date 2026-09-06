@@ -185,6 +185,12 @@ pub(super) async fn handle_socket(state: RealtimeContext, socket: WebSocket) {
 
 fn recognition_payload(event: DomainEvent) -> Option<Value> {
     match event.event_type.as_str() {
+        "translation.live_updated" => {
+            let mut payload = event.payload;
+            payload["type"] = json!("live_translation_updated");
+            payload["source"] = json!(event.source);
+            Some(payload)
+        }
         "asr.partial" => Some(json!({
             "type": "partial",
             "utterance_id": event.message_id,
@@ -236,6 +242,27 @@ mod tests {
             created_at: now_iso8601(),
             translations: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn live_translation_is_a_display_event_without_a_subtitle_id() {
+        let events = DomainEventHub::new();
+        let mut receiver = events.subscribe();
+        events.live_translation(
+            "speaker",
+            &crate::models::LiveTranslation {
+                utterance_id: "live-1".into(),
+                text: String::new(),
+                language: None,
+                translation: "hello".into(),
+                target_language: "en".into(),
+            },
+        );
+        let payload = recognition_payload(receiver.recv().await.unwrap()).unwrap();
+        assert_eq!(payload["type"], "live_translation_updated");
+        assert_eq!(payload["translation"], "hello");
+        assert_eq!(payload["source"], "speaker");
+        assert!(payload.get("subtitle_id").is_none());
     }
 
     #[tokio::test]

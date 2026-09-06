@@ -21,12 +21,14 @@ function profileLabel(profile: ApiProfileView): string {
 
 export function TranslationRouteList({
   title,
+  liveTranslate = false,
   targets,
   profiles,
   disabled,
   onChange,
 }: {
   title: string;
+  liveTranslate?: boolean;
   targets: TranslationTargetSettings[];
   profiles: ApiProfileView[];
   disabled: boolean;
@@ -72,6 +74,7 @@ export function TranslationRouteList({
           <TranslationRouteRow
             key={`${target.target_language}-${index}`}
             index={index}
+            native={liveTranslate && index === 0}
             target={target}
             profiles={translationProfiles}
             usedLanguages={targets.map((item) => item.target_language)}
@@ -104,6 +107,7 @@ export function TranslationRouteList({
 
 function TranslationRouteRow({
   index,
+  native,
   target,
   profiles,
   usedLanguages,
@@ -116,6 +120,7 @@ function TranslationRouteRow({
   onDelete,
 }: {
   index: number;
+  native: boolean;
   target: TranslationTargetSettings;
   profiles: ApiProfileView[];
   usedLanguages: string[];
@@ -130,9 +135,9 @@ function TranslationRouteRow({
   const { t } = useTranslation();
   const [switching, setSwitching] = useState(false);
   const profile = profiles.find((item) => item.id === target.profile_id);
-  const usesModels = Boolean(profile && supportsLlmModels(profile));
+  const usesModels = Boolean(!native && profile && supportsLlmModels(profile));
   const { models, loading, error, refresh, load } = useTranslationProfileModels(profile, usesModels);
-  const languageCodes = (profile?.capabilities.supported_languages ?? TRANSLATION_LANGUAGE_CODES)
+  const languageCodes = (native ? TRANSLATION_LANGUAGE_CODES.filter((code) => !["yue-Hant", "nl"].includes(code)) : profile?.capabilities.supported_languages ?? TRANSLATION_LANGUAGE_CODES)
     .filter((language) => language === target.target_language || !usedLanguages.includes(language));
   const thinkingControl = thinkingControlForModel(profile?.provider, target.model);
   const selectProfile = async (profileId: string) => {
@@ -162,18 +167,18 @@ function TranslationRouteRow({
           label={t("settings.translation.targetLanguageSettings")}
           value={target.target_language}
           languageCodes={languageCodes}
-          allowCustom={profile?.capabilities.supports_custom_translation_language ?? false}
+          allowCustom={!native && (profile?.capabilities.supports_custom_translation_language ?? false)}
           disabled={disabled}
           onChange={(target_language) => onChange({ ...target, target_language })}
         />
-        <Select
+        {native ? <small>Gemini Live Translate</small> : <Select
           hideLabel
           label={t("settings.translation.profile")}
           value={profile?.id ?? ""}
           disabled={disabled || switching || !profiles.length}
           options={profiles.map((item) => ({ value: item.id, label: profileLabel(item) }))}
           onChange={(profileId) => void selectProfile(profileId)}
-        />
+        />}
         {usesModels && (
           <div className="translation-route-model">
             <EditableDropdownField
@@ -197,7 +202,7 @@ function TranslationRouteRow({
           </div>
         )}
         {error && <small className="api-model-catalog-error">{error}</small>}
-        {thinkingControl === "disable_supported" && (
+        {!native && thinkingControl === "disable_supported" && (
           <PreferenceToggle
             title={t("settings.translation.thinkingMode")}
             checked={target.thinking_enabled}
