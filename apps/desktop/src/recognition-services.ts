@@ -112,3 +112,9 @@ export function recognitionEngineLabel(
 function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
+
+export function liveTranslationServiceName(serviceId: string | undefined): string | undefined {
+  if (serviceId === "gemini_live_translate") return "Gemini Live Translate";
+  if (serviceId === "openai_realtime_translate") return "OpenAI Realtime Translation";
+  return undefined;
+}

@@ -674,16 +674,32 @@ fn anki_name_limits_count_unicode_characters() {
 
 #[test]
 fn live_translation_does_not_require_a_text_profile_for_the_first_target() {
+    for service in [
+        crate::providers::SERVICE_GEMINI_LIVE_TRANSLATE,
+        crate::providers::SERVICE_OPENAI_REALTIME_TRANSLATE,
+    ] {
+        let mut config = AppConfig::default();
+        config.asr.backend = service.into();
+        config.translation.mode = "automatic".into();
+        assert!(config.validate_settings().is_ok());
+        config
+            .translation
+            .speaker_targets
+            .push(TranslationTargetConfig::new("ja"));
+        assert!(config.validate_settings().is_err());
+        config.translation.speaker_targets.pop();
+        config.translation.speaker_targets[0].target_language = "invalid language".into();
+        assert!(config.validate_settings().is_err());
+    }
+}
+
+#[test]
+fn openai_translation_does_not_inherit_gemini_language_restrictions() {
     let mut config = AppConfig::default();
-    config.asr.backend = crate::providers::SERVICE_GEMINI_LIVE_TRANSLATE.into();
+    config.asr.backend = crate::providers::SERVICE_OPENAI_REALTIME_TRANSLATE.into();
     config.translation.mode = "automatic".into();
+    config.translation.speaker_targets[0].target_language = "nl".into();
     assert!(config.validate_settings().is_ok());
-    config
-        .translation
-        .speaker_targets
-        .push(TranslationTargetConfig::new("ja"));
-    assert!(config.validate_settings().is_err());
-    config.translation.speaker_targets.pop();
-    config.translation.speaker_targets[0].target_language = "invalid-language".into();
+    config.asr.backend = crate::providers::SERVICE_GEMINI_LIVE_TRANSLATE.into();
     assert!(config.validate_settings().is_err());
 }

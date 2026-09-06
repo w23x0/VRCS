@@ -162,7 +162,7 @@ impl PipelineDependencies {
             text: transcript.translation.trim().to_owned(),
             source_language: transcript.language.clone(),
             target_language: transcript.target_language,
-            provider: crate::providers::GEMINI_PROVIDER.into(),
+            provider: result.provider,
             model: Some(result.model),
             created_at: now_iso8601(),
         };
@@ -381,6 +381,7 @@ mod tests {
 
     fn native_result() -> crate::asr::LiveTranslationResult {
         crate::asr::LiveTranslationResult {
+            provider: crate::providers::GEMINI_PROVIDER.into(),
             transcript: crate::models::LiveTranslation {
                 utterance_id: "native-1".into(),
                 text: "Hello.".into(),
@@ -394,55 +395,65 @@ mod tests {
 
     #[tokio::test]
     async fn native_translation_is_stored_and_extra_targets_are_not_preferred() {
-        let events = crate::domain_events::DomainEventHub::new();
-        let dependencies = super::super::tests::test_dependencies(events);
-        let mut presentation = dependencies.output.subscribe_presentation_events();
-        let mut translation_events = dependencies.output.subscribe_translations();
-        {
-            let mut config = dependencies.config.write().unwrap();
-            config.translation.mode = "automatic".into();
-            config.translation.speaker_targets = vec![
-                TranslationTargetConfig::new("zh-Hans"),
-                TranslationTargetConfig::new("ja"),
-            ];
-        }
-        dependencies
-            .publish_native_translation("speaker", native_result())
-            .await
-            .unwrap();
-        let history = dependencies
-            .database
-            .lock()
-            .unwrap()
-            .subtitle_history(10)
-            .unwrap();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].text, "Hello.");
-        assert_eq!(history[0].translations.len(), 1);
-        assert_eq!(history[0].translations[0].text, "你好。");
-        assert_eq!(history[0].translations[0].provider, "gemini");
-        assert_eq!(
-            history[0].translations[0].model.as_deref(),
-            Some("gemini-3.5-live-translate-preview")
-        );
-        assert!(matches!(presentation.try_recv().unwrap(),
+        for (provider, model) in [
+            ("gemini", "gemini-3.5-live-translate-preview"),
+            ("openai", "gpt-realtime-translate"),
+        ] {
+            let events = crate::domain_events::DomainEventHub::new();
+            let dependencies = super::super::tests::test_dependencies(events);
+            let mut presentation = dependencies.output.subscribe_presentation_events();
+            let mut translation_events = dependencies.output.subscribe_translations();
+            {
+                let mut config = dependencies.config.write().unwrap();
+                config.translation.mode = "automatic".into();
+                config.translation.speaker_targets = vec![
+                    TranslationTargetConfig::new("zh-Hans"),
+                    TranslationTargetConfig::new("ja"),
+                ];
+            }
+            let mut result = native_result();
+            result.transcript.text = "Hello. How are you?".into();
+            result.transcript.translation = "你好，最近怎么样？很高兴见到你。".into();
+            result.provider = provider.into();
+            result.model = model.into();
+            dependencies
+                .publish_native_translation("speaker", result)
+                .await
+                .unwrap();
+            let history = dependencies
+                .database
+                .lock()
+                .unwrap()
+                .subtitle_history(10)
+                .unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].text, "Hello. How are you?");
+            assert_eq!(history[0].translations.len(), 1);
+            assert_eq!(
+                history[0].translations[0].text,
+                "你好，最近怎么样？很高兴见到你。"
+            );
+            assert_eq!(history[0].translations[0].provider, provider);
+            assert_eq!(history[0].translations[0].model.as_deref(), Some(model));
+            assert!(matches!(presentation.try_recv().unwrap(),
             crate::subtitle_output::PresentationEvent::Final { subtitle, .. }
                 if subtitle.translations.len() == 1));
-        assert!(matches!(
-            translation_events.recv().await.unwrap(),
-            crate::subtitle_output::TranslationEvent::TranslationCompleted {
-                preferred: true,
-                ..
-            }
-        ));
-        let event =
-            tokio::time::timeout(std::time::Duration::from_secs(2), translation_events.recv())
-                .await
-                .unwrap()
-                .unwrap();
-        assert!(matches!(event,
+            assert!(matches!(
+                translation_events.recv().await.unwrap(),
+                crate::subtitle_output::TranslationEvent::TranslationCompleted {
+                    preferred: true,
+                    ..
+                }
+            ));
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(2), translation_events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(matches!(event,
             crate::subtitle_output::TranslationEvent::TranslationStarted { target_language, preferred: false, .. }
                 if target_language == "ja"));
+        }
     }
 
     #[tokio::test]

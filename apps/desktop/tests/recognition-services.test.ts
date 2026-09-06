@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  liveTranslationServiceName,
   recognitionEngineLabel,
   recognitionServicesForProfile,
   selectRecognitionService,
@@ -100,4 +101,14 @@ test("engine labels use catalog display names and safely fall back to service ID
   const selected = selectRecognitionService(asr, definitions[0].services[0]);
   assert.equal(recognitionEngineLabel(selected, [profile], definitions), "Groq Transcription");
   assert.equal(recognitionEngineLabel(selected, [], []), "groq-transcribe");
+});
+
+test("native translation services keep their own labels and model settings", () => {
+  assert.equal(liveTranslationServiceName("openai_realtime"), undefined);
+  assert.equal(liveTranslationServiceName("gemini_live_translate"), "Gemini Live Translate");
+  assert.equal(liveTranslationServiceName("openai_realtime_translate"), "OpenAI Realtime Translation");
+  const service = { ...definitions[0].services[0], id: "openai_realtime_translate", models: ["gpt-realtime-translate"] };
+  const selected = selectRecognitionService(asr, service);
+  assert.equal(selected.service_settings[service.id].model, "gpt-realtime-translate");
+  assert.equal(selected.active_profile_id, asr.active_profile_id);
 });

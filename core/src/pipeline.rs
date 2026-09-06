@@ -174,7 +174,7 @@ impl TranscriptionPipeline {
         }
         let smart_turn = if vad_config.endpointing == "smart_turn"
             && asr_config.backend != crate::providers::SERVICE_FUN_ASR_REALTIME
-            && asr_config.backend != crate::providers::SERVICE_GEMINI_LIVE_TRANSLATE
+            && !crate::providers::is_live_translation(&asr_config.backend)
         {
             match self.smart_turn_runtime.prepare().await {
                 Ok(()) => Some(self.smart_turn_runtime.clone()),
@@ -265,6 +265,8 @@ impl TranscriptionPipeline {
                     dependencies,
                     source,
                     cloud,
+                    continuous_from_start: asr_config.backend
+                        == crate::providers::SERVICE_OPENAI_REALTIME_TRANSLATE,
                     local_fallback: asr_config.cloud_failure_policy == "local",
                     echo_guard: asr_echo_guard,
                     sample_rate,
@@ -322,6 +324,7 @@ struct PipelineRunContext {
     source: &'static str,
     cloud: Option<CloudRecognitionSession>,
     local_fallback: bool,
+    continuous_from_start: bool,
     echo_guard: AsrEchoGuard,
     sample_rate: u32,
     trigger_threshold_dbfs: Option<f32>,
@@ -829,6 +832,7 @@ async fn run(
         source,
         mut cloud,
         local_fallback,
+        continuous_from_start,
         echo_guard,
         sample_rate,
         trigger_threshold_dbfs,
@@ -836,6 +840,7 @@ async fn run(
         smart_turn,
     } = context;
     let mut state = PipelineState::new(sample_rate);
+    state.streaming = continuous_from_start;
     let (smart_turn_tx, mut smart_turn_rx) = mpsc::unbounded_channel();
     let mut result = loop {
         if *shutdown.borrow() || *stop.borrow() {
@@ -1109,6 +1114,22 @@ mod tests {
     fn continuous_audio_does_not_commit_at_local_sentence_boundaries() {
         let mut state = PipelineState::new(16_000);
         state.streaming = true;
+        let effects = reduce_audio_event(
+            &mut state,
+            vec![0.0; 512],
+            AudioAnalysis {
+                rms_dbfs: -80.0,
+                peak_dbfs: -80.0,
+                trigger_speech: false,
+                vad_speech: false,
+                publish_audio_level: false,
+                now: Instant::now(),
+            },
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [PipelineEffect::ProcessAudio { speech: false, .. }]
+        ));
         let effects = reduce_pipeline_event(
             &mut state,
             PipelineEvent::SegmentEnded {

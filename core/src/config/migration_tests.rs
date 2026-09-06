@@ -8,6 +8,28 @@ use crate::providers::{
 };
 
 #[test]
+fn existing_config_gets_translation_settings_without_changing_recognition() {
+    let mut before = AppConfig::default();
+    before.asr.backend = SERVICE_OPENAI_REALTIME.into();
+    before
+        .asr
+        .service_settings
+        .remove(providers::SERVICE_OPENAI_REALTIME_TRANSLATE);
+    let after = config_from_value(&serde_json::to_value(&before).unwrap()).unwrap();
+    assert_eq!(after.asr.backend, before.asr.backend);
+    assert_eq!(after.asr.active_profile_id, before.asr.active_profile_id);
+    assert_eq!(after.translation, before.translation);
+    assert_eq!(
+        after.asr.service_settings[SERVICE_OPENAI_REALTIME],
+        before.asr.service_settings[SERVICE_OPENAI_REALTIME]
+    );
+    assert_eq!(
+        after.asr.service_settings[providers::SERVICE_OPENAI_REALTIME_TRANSLATE].model,
+        "gpt-realtime-translate"
+    );
+}
+
+#[test]
 fn schema_v3_without_model_directory_uses_the_default() {
     let config = config_from_value(&serde_json::json!({
         "schema_version": 3

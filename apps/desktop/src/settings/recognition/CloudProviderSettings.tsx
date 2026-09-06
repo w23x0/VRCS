@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { providersApi } from "../../providers/api";
 import { localizedError } from "../../app/app-utils";
 import {
+  liveTranslationServiceName,
   currentRecognitionProfile,
   currentRecognitionService,
   recognitionServicesForProfile,
@@ -157,8 +158,8 @@ export function CloudProviderSettings({
           />
         )}
         <RecognitionLanguageSelect
-          value={service?.id === "gemini_live_translate" ? "auto" : draft.asr.language}
-          disabled={disabled || service?.id === "gemini_live_translate"}
+          value={Boolean(liveTranslationServiceName(service?.id)) ? "auto" : draft.asr.language}
+          disabled={disabled || Boolean(liveTranslationServiceName(service?.id))}
           onChange={(value) => onUpdateAsr("language", value)}
         />
         {service?.recognition_transport === "segmented_upload" && (
@@ -168,7 +169,7 @@ export function CloudProviderSettings({
             {!service.partial_results && <small>{t("settings.recognition.segmentedUpload.noPartial")}</small>}
           </div>
         )}
-        {service?.id === "gemini_live_translate" && <div className="cloud-transport-hint" role="note"><strong>Gemini Live Translate</strong><small>{t("settings.translation.liveTranslateHint")}</small><small>{t("settings.translation.liveTranslatePreview")}</small></div>}
+        {Boolean(liveTranslationServiceName(service?.id)) && <div className="cloud-transport-hint" role="note"><strong>{liveTranslationServiceName(service?.id)}</strong><small>{t("settings.translation.liveTranslateHint")}</small><small>{t("settings.translation.liveTranslatePreview")}</small></div>}
         {selectedProfile && <small className="cloud-api-hint">{t("settings.recognition.selectedApiHint", { name: selectedProfile.name })}</small>}
       </div>
     </div>

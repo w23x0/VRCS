@@ -1,7 +1,9 @@
 mod fun_asr;
 mod gemini;
 mod gemini_live_translate;
+mod live_translation;
 mod openai;
+mod openai_live_translate;
 mod qwen;
 
 use std::collections::HashMap;
@@ -25,7 +27,7 @@ pub(super) struct NormalizationState {
     pub(super) transcripts: HashMap<String, String>,
     fallback_id: Option<String>,
     snapshot_id: Option<String>,
-    live_translation: gemini_live_translate::State,
+    live_translation: live_translation::State,
 }
 
 impl NormalizationState {
@@ -122,6 +124,7 @@ pub(super) enum Provider {
     TokenPlan,
     FunAsr,
     OpenAi,
+    OpenAiLiveTranslate,
     Gemini,
     GeminiLiveTranslate,
 }
@@ -140,13 +143,33 @@ pub(super) enum InitializationEvent {
 }
 
 impl Provider {
+    pub(super) fn audio_packet_samples(self) -> usize {
+        if self == Self::OpenAiLiveTranslate {
+            3200
+        } else {
+            1600
+        }
+    }
+
+    pub(super) fn poll_translation(
+        self,
+        config: &AsrConfig,
+        state: &mut NormalizationState,
+    ) -> Option<CloudEvent> {
+        if matches!(self, Self::GeminiLiveTranslate | Self::OpenAiLiveTranslate) {
+            live_translation::poll(config, &mut state.live_translation)
+        } else {
+            None
+        }
+    }
+
     pub(super) fn finish_translation(
         self,
         config: &AsrConfig,
         state: &mut NormalizationState,
     ) -> Option<CloudEvent> {
-        if self == Self::GeminiLiveTranslate {
-            gemini_live_translate::finish(config, &mut state.live_translation)
+        if matches!(self, Self::GeminiLiveTranslate | Self::OpenAiLiveTranslate) {
+            live_translation::finish(config, &mut state.live_translation)
         } else {
             None
         }
@@ -168,6 +191,7 @@ impl Provider {
             ServiceAdapter::AlibabaTokenPlanRealtime => Ok(Self::TokenPlan),
             ServiceAdapter::FunAsrRealtime => Ok(Self::FunAsr),
             ServiceAdapter::OpenAiRealtime => Ok(Self::OpenAi),
+            ServiceAdapter::OpenAiRealtimeTranslate => Ok(Self::OpenAiLiveTranslate),
             ServiceAdapter::GeminiTranscribe => Ok(Self::Gemini),
             ServiceAdapter::GeminiLiveTranslate => Ok(Self::GeminiLiveTranslate),
             _ => Err(format!(
@@ -187,6 +211,7 @@ impl Provider {
             Self::TokenPlan => qwen::build_token_plan_request(config, key),
             Self::FunAsr => fun_asr::build_request(profile, key),
             Self::OpenAi => openai::build_request(key),
+            Self::OpenAiLiveTranslate => openai_live_translate::build_request(config, key),
             Self::Gemini | Self::GeminiLiveTranslate => gemini::build_request(key),
         }
     }
@@ -201,7 +226,7 @@ impl Provider {
                 SegmentationMode::LocalCommit
             }
             Self::FunAsr => SegmentationMode::ServerVad,
-            Self::GeminiLiveTranslate => SegmentationMode::Continuous,
+            Self::GeminiLiveTranslate | Self::OpenAiLiveTranslate => SegmentationMode::Continuous,
         }
     }
 
@@ -220,12 +245,13 @@ impl Provider {
                 task_id.expect("Fun-ASR sessions always have a task id"),
             ),
             Self::OpenAi => openai::session_update(config),
+            Self::OpenAiLiveTranslate => openai_live_translate::session_update(config),
             Self::Gemini => gemini::setup(config),
             Self::GeminiLiveTranslate => gemini_live_translate::setup(config),
         }
     }
 
-    pub(super) fn initialization_event(self, value: &Value) -> InitializationEvent {
+    pub(super) fn initialization_event(self, value: &Value, update: &Value) -> InitializationEvent {
         match self {
             Self::Qwen | Self::TokenPlan | Self::OpenAi => {
                 match value.get("type").and_then(Value::as_str) {
@@ -252,6 +278,7 @@ impl Provider {
                 _ => InitializationEvent::Pending,
             },
             Self::Gemini | Self::GeminiLiveTranslate => gemini::initialization_event(value),
+            Self::OpenAiLiveTranslate => openai_live_translate::initialization_event(value, update),
         }
     }
 
@@ -265,6 +292,9 @@ impl Provider {
             Self::Qwen | Self::TokenPlan => qwen::normalize_event(config, value, state),
             Self::FunAsr => fun_asr::normalize_event(config, value, state),
             Self::OpenAi => openai::normalize_event(config, value, state),
+            Self::OpenAiLiveTranslate => {
+                openai_live_translate::normalize_event(config, value, &mut state.live_translation)
+            }
             Self::Gemini => gemini::normalize_event(config, value, state),
             Self::GeminiLiveTranslate => {
                 gemini_live_translate::normalize_event(config, value, &mut state.live_translation)
@@ -277,6 +307,7 @@ impl Provider {
             Self::Qwen | Self::TokenPlan => qwen::audio_message(samples),
             Self::FunAsr => fun_asr::audio_message(samples),
             Self::OpenAi => openai::audio_message(samples),
+            Self::OpenAiLiveTranslate => openai_live_translate::audio_message(samples),
             Self::Gemini | Self::GeminiLiveTranslate => gemini::audio_message(samples),
         }
     }
@@ -286,7 +317,7 @@ impl Provider {
             Self::Qwen | Self::TokenPlan => Some(qwen::commit_message()),
             Self::OpenAi => Some(openai::commit_message()),
             Self::Gemini => Some(gemini::commit_message()),
-            Self::FunAsr | Self::GeminiLiveTranslate => None,
+            Self::FunAsr | Self::GeminiLiveTranslate | Self::OpenAiLiveTranslate => None,
         }
     }
 
@@ -300,6 +331,11 @@ impl Provider {
             Self::OpenAi => None,
             Self::Gemini => None,
             Self::GeminiLiveTranslate => Some(gemini::commit_message()),
+            Self::OpenAiLiveTranslate => Some(Message::Text(
+                serde_json::json!({"type": "session.close"})
+                    .to_string()
+                    .into(),
+            )),
         }
     }
 
@@ -311,6 +347,7 @@ impl Provider {
                 value.pointer("/header/event").and_then(Value::as_str) == Some("task-finished")
             }
             Self::OpenAi => false,
+            Self::OpenAiLiveTranslate => value["type"].as_str() == Some("session.closed"),
             Self::Gemini | Self::GeminiLiveTranslate => false,
         }
     }

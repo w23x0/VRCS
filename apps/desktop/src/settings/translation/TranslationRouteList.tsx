@@ -2,6 +2,7 @@ import { ArrowDown, ArrowUp, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { liveTranslationServiceName } from "../../recognition-services";
 import { supportsLlmModels, supportsTranslation } from "../../api-profile-purpose";
 import { EditableDropdownField } from "../../shared/ui/DropdownField";
 import { LanguagePicker } from "../../shared/ui/LanguagePicker";
@@ -21,14 +22,14 @@ function profileLabel(profile: ApiProfileView): string {
 
 export function TranslationRouteList({
   title,
-  liveTranslate = false,
+  liveService,
   targets,
   profiles,
   disabled,
   onChange,
 }: {
   title: string;
-  liveTranslate?: boolean;
+  liveService?: string;
   targets: TranslationTargetSettings[];
   profiles: ApiProfileView[];
   disabled: boolean;
@@ -74,7 +75,7 @@ export function TranslationRouteList({
           <TranslationRouteRow
             key={`${target.target_language}-${index}`}
             index={index}
-            native={liveTranslate && index === 0}
+            liveService={index === 0 ? liveService : undefined}
             target={target}
             profiles={translationProfiles}
             usedLanguages={targets.map((item) => item.target_language)}
@@ -107,7 +108,7 @@ export function TranslationRouteList({
 
 function TranslationRouteRow({
   index,
-  native,
+  liveService,
   target,
   profiles,
   usedLanguages,
@@ -120,7 +121,7 @@ function TranslationRouteRow({
   onDelete,
 }: {
   index: number;
-  native: boolean;
+  liveService?: string;
   target: TranslationTargetSettings;
   profiles: ApiProfileView[];
   usedLanguages: string[];
@@ -133,11 +134,12 @@ function TranslationRouteRow({
   onDelete: () => void;
 }) {
   const { t } = useTranslation();
+  const native = liveTranslationServiceName(liveService);
   const [switching, setSwitching] = useState(false);
   const profile = profiles.find((item) => item.id === target.profile_id);
   const usesModels = Boolean(!native && profile && supportsLlmModels(profile));
   const { models, loading, error, refresh, load } = useTranslationProfileModels(profile, usesModels);
-  const languageCodes = (native ? TRANSLATION_LANGUAGE_CODES.filter((code) => !["yue-Hant", "nl"].includes(code)) : profile?.capabilities.supported_languages ?? TRANSLATION_LANGUAGE_CODES)
+  const languageCodes = (native ? TRANSLATION_LANGUAGE_CODES.filter((code) => liveService !== "gemini_live_translate" || !["yue-Hant", "nl"].includes(code)) : profile?.capabilities.supported_languages ?? TRANSLATION_LANGUAGE_CODES)
     .filter((language) => language === target.target_language || !usedLanguages.includes(language));
   const thinkingControl = thinkingControlForModel(profile?.provider, target.model);
   const selectProfile = async (profileId: string) => {
@@ -171,7 +173,7 @@ function TranslationRouteRow({
           disabled={disabled}
           onChange={(target_language) => onChange({ ...target, target_language })}
         />
-        {native ? <small>Gemini Live Translate</small> : <Select
+        {native ? <small>{native}</small> : <Select
           hideLabel
           label={t("settings.translation.profile")}
           value={profile?.id ?? ""}

@@ -32,6 +32,7 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveTranslationResult {
+    pub provider: String,
     pub transcript: crate::models::LiveTranslation,
     pub model: String,
 }
@@ -257,8 +258,7 @@ pub async fn test_streaming_connection(
         &mut NormalizationState::default(),
         &events,
     )
-    .await;
-    Ok(())
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -287,6 +287,16 @@ async fn run_with_reconnect(
         )
         .await;
         if *stop.borrow() || audio.is_closed() {
+            if let Err(detail) = outcome {
+                let _ = events
+                    .send(CloudEvent::Failed {
+                        utterance_id: None,
+                        reset_session: true,
+                        code: "asr.cloud_drain_failed".into(),
+                        detail,
+                    })
+                    .await;
+            }
             break;
         }
         let detail = match outcome {
@@ -310,6 +320,13 @@ async fn run_with_reconnect(
         }
         match connect_initialized(provider, &config, &profile, silence_seconds, &key).await {
             Ok((next_socket, next_task_id)) => {
+                if provider == Provider::OpenAiLiveTranslate {
+                    while let Ok(input) = audio.try_recv() {
+                        if let StreamingInput::Commit(result) = input {
+                            let _ = result.send(Err("Translation session reconnected".into()));
+                        }
+                    }
+                }
                 socket = next_socket;
                 task_id = next_task_id;
                 backoff = Duration::from_millis(500);
@@ -341,22 +358,42 @@ async fn run_session(
     let mut normalization = NormalizationState::default();
     let mut audio_buffer = Vec::with_capacity(2048);
     let mut pending_audio = false;
+    let mut translation_tick = tokio::time::interval(Duration::from_millis(100));
     loop {
         tokio::select! {
+            _ = translation_tick.tick(), if provider.segmentation_mode() == SegmentationMode::Continuous => {
+                if let Some(event) = provider.poll_translation(config, &mut normalization) {
+                    if events.send(event).await.is_err() { return Ok(()); }
+                }
+            }
             _ = stop.changed() => {
-                let _ = flush_audio_buffer(provider, socket, &mut audio_buffer).await;
+                if provider == Provider::OpenAiLiveTranslate {
+                    audio.close();
+                    while let Some(input) = audio.recv().await {
+                        match input {
+                            StreamingInput::Audio(samples) => {
+                                pending_audio = true;
+                                audio_buffer.extend_from_slice(&samples);
+                                while let Some(packet) = take_audio_packet(&mut audio_buffer, provider.audio_packet_samples()) {
+                                    send_audio(provider, socket, packet).await?;
+                                }
+                            }
+                            StreamingInput::Commit(result) => { let _ = result.send(Ok(())); }
+                        }
+                    }
+                }
+                flush_audio_buffer(provider, socket, &mut audio_buffer).await?;
                 if pending_audio {
                     let _ = commit_utterance(provider, socket).await;
                 }
-                finish(provider, socket, config, task_id, &mut normalization, events).await;
-                return Ok(());
+                return finish(provider, socket, config, task_id, &mut normalization, events).await;
             }
             input = audio.recv() => {
                 match input {
                     Some(StreamingInput::Audio(samples)) => {
                         pending_audio = true;
                         audio_buffer.extend_from_slice(samples.as_slice());
-                        while let Some(packet) = take_audio_packet(&mut audio_buffer) {
+                        while let Some(packet) = take_audio_packet(&mut audio_buffer, provider.audio_packet_samples()) {
                             send_audio(provider, socket, packet).await?;
                         }
                     }
@@ -378,17 +415,23 @@ async fn run_session(
                         }
                     }
                     None => {
-                        let _ = flush_audio_buffer(provider, socket, &mut audio_buffer).await;
+                        flush_audio_buffer(provider, socket, &mut audio_buffer).await?;
                         if pending_audio {
                             let _ = commit_utterance(provider, socket).await;
                         }
-                        finish(provider, socket, config, task_id, &mut normalization, events).await;
-                        return Ok(());
+                        return finish(provider, socket, config, task_id, &mut normalization, events).await;
                     }
                 }
             }
             message = receive_event(socket) => {
-                if let Some(event) = provider.normalize_event(config, &message?, &mut normalization)? {
+                let value = message?;
+                if provider == Provider::OpenAiLiveTranslate && provider.is_finished(&value) {
+                    if let Some(event) = provider.finish_translation(config, &mut normalization) {
+                        let _ = events.send(event).await;
+                    }
+                    return Err("OpenAI closed the translation session".into());
+                }
+                if let Some(event) = provider.normalize_event(config, &value, &mut normalization)? {
                     if events.send(event).await.is_err() {
                         return Ok(());
                     }
@@ -441,7 +484,7 @@ async fn initialize_socket(
         .map_err(|error| format!("Failed to initialize cloud recognition session: {error}"))?;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            match provider.initialization_event(&receive_event(socket).await?) {
+            match provider.initialization_event(&receive_event(socket).await?, &update) {
                 InitializationEvent::Ready => return Ok(()),
                 InitializationEvent::Failed(detail) => return Err(detail),
                 InitializationEvent::Pending => {}
@@ -495,10 +538,11 @@ fn normalize_event(
     provider.normalize_event(config, &value, state)
 }
 
+#[cfg(test)]
 const AUDIO_PACKET_SAMPLES: usize = 1600;
 
-fn take_audio_packet(buffer: &mut Vec<f32>) -> Option<Vec<f32>> {
-    (buffer.len() >= AUDIO_PACKET_SAMPLES).then(|| buffer.drain(..AUDIO_PACKET_SAMPLES).collect())
+fn take_audio_packet(buffer: &mut Vec<f32>, packet_samples: usize) -> Option<Vec<f32>> {
+    (buffer.len() >= packet_samples).then(|| buffer.drain(..packet_samples).collect())
 }
 
 fn take_buffered_audio(buffer: &mut Vec<f32>) -> Option<Vec<f32>> {
@@ -544,37 +588,50 @@ async fn finish(
     task_id: Option<&str>,
     state: &mut NormalizationState,
     events: &mpsc::Sender<CloudEvent>,
-) {
+) -> Result<(), String> {
     if let Some(message) = provider.finish_message(task_id) {
-        let _ = socket.send(message).await;
+        socket
+            .send(message)
+            .await
+            .map_err(|e| format!("Failed to close cloud recognition session: {e}"))?;
     }
     let deadline = tokio::time::sleep(Duration::from_secs(
-        if provider == Provider::GeminiLiveTranslate {
+        if matches!(
+            provider,
+            Provider::GeminiLiveTranslate | Provider::OpenAiLiveTranslate
+        ) {
             5
         } else {
             3
         },
     ));
     tokio::pin!(deadline);
-    loop {
+    let outcome = loop {
         tokio::select! {
-            _ = &mut deadline => break,
+            _ = &mut deadline => break Err("Timed out waiting for cloud recognition to finish".to_owned()),
             message = receive_event(socket) => {
-                let Ok(value) = message else { break };
+                let value = match message { Ok(value) => value, Err(error) => break Err(error) };
                 let finished = provider.is_finished(&value);
-                if let Ok(Some(event)) = provider.normalize_event(config, &value, state) {
-                    let _ = events.send(event).await;
+                match provider.normalize_event(config, &value, state) {
+                    Ok(Some(event)) => { let _ = events.send(event).await; }
+                    Ok(None) => {}
+                    Err(error) => break Err(error),
                 }
-                if finished {
-                    break;
-                }
+                if finished { break Ok(()); }
             }
         }
-    }
-    if let Some(event) = provider.finish_translation(config, state) {
-        let _ = events.send(event).await;
+    };
+    if provider != Provider::OpenAiLiveTranslate || outcome.is_ok() {
+        if let Some(event) = provider.finish_translation(config, state) {
+            let _ = events.send(event).await;
+        }
     }
     let _ = socket.close(None).await;
+    if provider == Provider::OpenAiLiveTranslate {
+        outcome
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -630,6 +687,249 @@ mod tests {
             Message::Binary(serde_json::to_vec(&value).unwrap().into())
         } else {
             Message::Text(value.to_string().into())
+        }
+    }
+
+    fn translation_config() -> AsrConfig {
+        AsrConfig {
+            backend: providers::SERVICE_OPENAI_REALTIME_TRANSLATE.into(),
+            live_translation_target: Some("zh-Hant".into()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_translation_settles_without_stop_and_keeps_late_translation_on_the_source() {
+        let (mut client, mut server) = socket_pair().await;
+        let (_audio_tx, mut audio_rx) = mpsc::channel(1);
+        let (events, mut received) = mpsc::channel(8);
+        let (stop, mut stopped) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            run_session(
+                Provider::OpenAiLiveTranslate,
+                &translation_config(),
+                &mut client,
+                None,
+                &mut audio_rx,
+                &events,
+                &mut stopped,
+            )
+            .await
+            .unwrap();
+        });
+        let exchange = async {
+            server.send(json_frame(serde_json::json!({"type":"session.input_transcript.delta","delta":"Hello. How are you?"}), false)).await.unwrap();
+            let CloudEvent::LiveTranslation {
+                snapshot,
+                completed,
+            } = received.recv().await.unwrap()
+            else {
+                panic!()
+            };
+            assert!(completed.is_empty());
+            let id = snapshot.utterance_id;
+            assert!(
+                tokio::time::timeout(Duration::from_millis(900), received.recv())
+                    .await
+                    .is_err()
+            );
+            for delta in ["你好", "，最近怎么样？"] {
+                server
+                    .send(json_frame(
+                        serde_json::json!({"type":"session.output_transcript.delta","delta":delta}),
+                        true,
+                    ))
+                    .await
+                    .unwrap();
+                let CloudEvent::LiveTranslation {
+                    snapshot,
+                    completed,
+                } = received.recv().await.unwrap()
+                else {
+                    panic!()
+                };
+                assert_eq!(snapshot.utterance_id, id);
+                assert_eq!(snapshot.text, "Hello. How are you?");
+                assert!(completed.is_empty());
+            }
+            let CloudEvent::LiveTranslation { completed, .. } = received.recv().await.unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(completed.len(), 1);
+            assert_eq!(completed[0].transcript.utterance_id, id);
+            assert_eq!(completed[0].transcript.text, "Hello. How are you?");
+            assert_eq!(completed[0].transcript.translation, "你好，最近怎么样？");
+            stop.send(true).unwrap();
+            let close = server.next().await.unwrap().unwrap();
+            assert!(close.to_text().unwrap().contains("session.close"));
+            server
+                .send(json_frame(
+                    serde_json::json!({"type":"session.closed"}),
+                    false,
+                ))
+                .await
+                .unwrap();
+            task.await.unwrap();
+            assert!(received.recv().await.is_none());
+        };
+        tokio::time::timeout(Duration::from_secs(4), exchange)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn openai_translation_sends_queued_audio_before_close_and_flushes_tail_once() {
+        use base64::Engine as _;
+        for binary in [false, true] {
+            let (mut client, mut server) = socket_pair().await;
+            let (audio_tx, audio_rx) = mpsc::channel(4);
+            let (event_tx, event_rx) = mpsc::channel(1);
+            let (stop_tx, stop_rx) = watch::channel(false);
+            for size in [1600, 1600, 1600, 100] {
+                audio_tx
+                    .send(StreamingInput::Audio(std::sync::Arc::new(vec![0.0; size])))
+                    .await
+                    .unwrap();
+            }
+            let task = tokio::spawn(async move {
+                let mut audio_rx = audio_rx;
+                let mut stop_rx = stop_rx;
+                run_session(
+                    Provider::OpenAiLiveTranslate,
+                    &translation_config(),
+                    &mut client,
+                    None,
+                    &mut audio_rx,
+                    &event_tx,
+                    &mut stop_rx,
+                )
+                .await
+                .unwrap();
+            });
+            let session = StreamingSession {
+                audio: audio_tx,
+                events: event_rx,
+                stop: stop_tx,
+                task,
+                segmentation_mode: SegmentationMode::Continuous,
+            };
+            let exchange = async {
+                let (events, ()) = tokio::join!(session.stop_and_drain(), async {
+                    for size in [3200, 1700] {
+                        let message = server.next().await.unwrap().unwrap();
+                        let value: Value =
+                            serde_json::from_str(message.to_text().unwrap()).unwrap();
+                        assert_eq!(value["type"], "session.input_audio_buffer.append");
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(value["audio"].as_str().unwrap())
+                            .unwrap();
+                        assert_eq!(bytes, vec![0; size * 3]);
+                    }
+                    let close = server.next().await.unwrap().unwrap();
+                    let close: Value = serde_json::from_str(close.to_text().unwrap()).unwrap();
+                    assert_eq!(close["type"], "session.close");
+                    server.send(Message::Ping(vec![1].into())).await.unwrap();
+                    for (kind, delta) in [
+                        ("input_transcript", "Hello. Tail"),
+                        ("output_audio", "AA=="),
+                        ("output_transcript", "你好。尾句"),
+                    ] {
+                        server.send(json_frame(serde_json::json!({"type": format!("session.{kind}.delta"), "delta": delta}), binary)).await.unwrap();
+                    }
+                    server
+                        .send(json_frame(
+                            serde_json::json!({"type":"session.closed"}),
+                            binary,
+                        ))
+                        .await
+                        .unwrap();
+                    while let Some(Ok(message)) = server.next().await {
+                        match message {
+                            Message::Close(_) => break,
+                            Message::Pong(_) => {}
+                            other => {
+                                panic!("unexpected client message after session.close: {other:?}")
+                            }
+                        }
+                    }
+                });
+                let results: Vec<_> = events
+                    .into_iter()
+                    .flat_map(|event| match event {
+                        CloudEvent::LiveTranslation { completed, .. } => completed,
+                        other => panic!("unexpected event: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].transcript.text, "Hello. Tail");
+                assert_eq!(results[0].transcript.translation, "你好。尾句");
+            };
+            tokio::time::timeout(Duration::from_secs(2), exchange)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_translation_incomplete_drain_does_not_finalize_pending_text() {
+        for disconnect in [false, true] {
+            let (mut client, mut server) = socket_pair().await;
+            let config = translation_config();
+            let mut state = NormalizationState::default();
+            Provider::OpenAiLiveTranslate
+                .normalize_event(
+                    &config,
+                    &serde_json::json!({"type":"session.input_transcript.delta","delta":"pending"}),
+                    &mut state,
+                )
+                .unwrap();
+            let (events, mut received) = mpsc::channel(4);
+            let (result, ()) = tokio::join!(
+                finish(
+                    Provider::OpenAiLiveTranslate,
+                    &mut client,
+                    &config,
+                    None,
+                    &mut state,
+                    &events
+                ),
+                async {
+                    server.next().await.unwrap().unwrap();
+                    server.send(json_frame(serde_json::json!({"type":"session.output_transcript.delta","delta":"未完成"}), false)).await.unwrap();
+                    if disconnect {
+                        server.close(None).await.unwrap();
+                    } else {
+                        while let Some(Ok(message)) = server.next().await {
+                            if matches!(message, Message::Close(_)) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            );
+            assert!(result.is_err());
+            if !disconnect {
+                assert!(result.unwrap_err().contains("Timed out"));
+            }
+            while let Ok(event) = received.try_recv() {
+                let CloudEvent::LiveTranslation { completed, .. } = event else {
+                    panic!()
+                };
+                assert!(completed.is_empty());
+            }
+            // A new session has no source text to pair with an old translation.
+            let mut reconnected = NormalizationState::default();
+            Provider::OpenAiLiveTranslate
+                .normalize_event(
+                    &config,
+                    &serde_json::json!({"type":"session.output_transcript.delta","delta":"stale"}),
+                    &mut reconnected,
+                )
+                .unwrap();
+            assert!(Provider::OpenAiLiveTranslate
+                .finish_translation(&config, &mut reconnected)
+                .is_none());
         }
     }
 
@@ -1192,7 +1492,7 @@ mod tests {
         let mut sent_samples = 0;
         for _ in 0..13 {
             buffer.extend(vec![0.0; 512]);
-            while let Some(packet) = take_audio_packet(&mut buffer) {
+            while let Some(packet) = take_audio_packet(&mut buffer, AUDIO_PACKET_SAMPLES) {
                 assert_eq!(packet.len(), 1600);
                 sent_samples += packet.len();
             }

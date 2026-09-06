@@ -180,6 +180,7 @@ fn adapter_id(adapter: ServiceAdapter) -> &'static str {
         ServiceAdapter::OpenAiRealtime => "openai_realtime",
         ServiceAdapter::GeminiTranscribe => "gemini_transcribe",
         ServiceAdapter::GeminiLiveTranslate => "gemini_live_translate",
+        ServiceAdapter::OpenAiRealtimeTranslate => "openai_realtime_translate",
         ServiceAdapter::OpenAiAudioTranscriptions => "openai_audio_transcriptions",
     }
 }

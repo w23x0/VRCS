@@ -31,11 +31,22 @@ pub const SERVICE_QWEN_REALTIME: &str = "qwen_realtime";
 pub const SERVICE_FUN_ASR_REALTIME: &str = "fun_asr_realtime";
 pub const SERVICE_TOKEN_PLAN_REALTIME: &str = "token_plan_realtime";
 pub const SERVICE_OPENAI_REALTIME: &str = "openai_realtime";
+pub const SERVICE_OPENAI_REALTIME_TRANSLATE: &str = "openai_realtime_translate";
 pub const SERVICE_GROQ_TRANSCRIPTION: &str = "groq_transcription";
 pub const SERVICE_GEMINI_TRANSCRIBE: &str = "gemini_transcribe";
 pub const SERVICE_GEMINI_LIVE_TRANSLATE: &str = "gemini_live_translate";
 
-pub fn validate_live_translation_language(language: &str) -> Result<(), String> {
+pub fn is_live_translation(service: &str) -> bool {
+    matches!(
+        service,
+        SERVICE_GEMINI_LIVE_TRANSLATE | SERVICE_OPENAI_REALTIME_TRANSLATE
+    )
+}
+
+pub fn validate_live_translation_language(service: &str, language: &str) -> Result<(), String> {
+    if service == SERVICE_OPENAI_REALTIME_TRANSLATE {
+        return openai_translation_language(language).map(|_| ());
+    }
     const LANGUAGES: &str = "af ak sq am ar hy az eu be bn bg my ca zh-Hans zh-Hant hr cs da en et fil fi fr gl ka de el gu ha he hi hu is id it ja jv kn kk km ko lo lv lt lb mk ms ml mr mn ne no nb fa pl pt-BR pt-PT pa ro ru sr sd si sk sl es su sw sv ta te th tr uk ur uz vi zu";
     if LANGUAGES.split_whitespace().any(|code| code == language) {
         Ok(())
@@ -43,6 +54,23 @@ pub fn validate_live_translation_language(language: &str) -> Result<(), String> 
         Err(format!(
             "Unsupported Gemini Live Translate target language: {language}"
         ))
+    }
+}
+
+pub fn openai_translation_language(language: &str) -> Result<&str, String> {
+    // The translation API accepts base languages, not these application tags.
+    let wire = match language {
+        "zh-Hans" | "zh-Hant" => "zh",
+        "pt-BR" | "pt-PT" => "pt",
+        "fil" => "tl",
+        "nb" => "no",
+        other => other,
+    };
+    const LANGUAGES: &str = "af ar az be bg bs ca cs cy da de el en es et fa fi fr gl he hi hr hu hy id is it iw ja kk kn ko lt lv mi mk mr ms ne nl no pl pt ro ru sk sl sr sv sw ta th tl tr uk ur vi zh";
+    if LANGUAGES.split_whitespace().any(|code| code == wire) {
+        Ok(wire)
+    } else {
+        Err(format!("Unsupported OpenAI Realtime Translation target language: {language}"))
     }
 }
 
@@ -145,6 +173,7 @@ pub enum ServiceAdapter {
     AlibabaTokenPlanRealtime,
     FunAsrRealtime,
     OpenAiRealtime,
+    OpenAiRealtimeTranslate,
     GeminiTranscribe,
     GeminiLiveTranslate,
     OpenAiAudioTranscriptions,
@@ -284,6 +313,18 @@ const OPENAI_SERVICES: &[ProviderServiceDefinition] = &[
             transport: RecognitionTransport::RealtimeStream,
             partial_results: true,
             models: OPENAI_ASR_MODELS,
+            context_max_chars: None,
+            support: SupportLevel::Native,
+        },
+    ),
+    recognition_service_definition(
+        SERVICE_OPENAI_REALTIME_TRANSLATE,
+        "OpenAI Realtime Translation",
+        ServiceAdapter::OpenAiRealtimeTranslate,
+        RecognitionServiceSpec {
+            transport: RecognitionTransport::RealtimeStream,
+            partial_results: true,
+            models: &["gpt-realtime-translate"],
             context_max_chars: None,
             support: SupportLevel::Native,
         },

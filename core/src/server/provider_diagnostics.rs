@@ -81,7 +81,7 @@ pub(super) async fn credential_test(
     match capability {
         CAPABILITY_SPEECH_TO_TEXT => {
             let mut asr_config = config.asr.clone();
-            if service.id == providers::SERVICE_GEMINI_LIVE_TRANSLATE {
+            if providers::is_live_translation(service.id) {
                 let language = state
                     .config
                     .language_session
@@ -129,7 +129,8 @@ async fn test_recognition_service(
         | ServiceAdapter::FunAsrRealtime
         | ServiceAdapter::OpenAiRealtime
         | ServiceAdapter::GeminiTranscribe
-        | ServiceAdapter::GeminiLiveTranslate => {
+        | ServiceAdapter::GeminiLiveTranslate
+        | ServiceAdapter::OpenAiRealtimeTranslate => {
             asr::streaming_test_backend(config, &profile.id, Some(service.id)).map_err(
                 |error| {
                     api_error(

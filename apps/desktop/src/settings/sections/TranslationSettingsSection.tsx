@@ -1,6 +1,7 @@
 import { Languages, Workflow } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { liveTranslationServiceName } from "../../recognition-services";
 import { supportsContext, supportsTranslation } from "../../api-profile-purpose";
 import type { ApiProfileView } from "../../providers/types";
 import type {
@@ -20,7 +21,7 @@ export function TranslationSettingsSection({ draft, apiProfiles, saveState, appl
   applySettings: ApplySettings;
 }) {
   const { t } = useTranslation();
-  const liveTranslate = draft.asr.backend === "gemini_live_translate";
+  const liveTranslate = Boolean(liveTranslationServiceName(draft.asr.backend));
   const translationProfiles = apiProfiles.filter(supportsTranslation);
   const preferred = draft.translation.speaker_targets[0];
   const enhancementProfile = translationProfiles.find(
@@ -77,7 +78,7 @@ export function TranslationSettingsSection({ draft, apiProfiles, saveState, appl
             <TranslationRouteList
               title={t("settings.translation.targetLanguageForSelf")}
               targets={draft.translation.microphone_targets}
-              liveTranslate={liveTranslate && draft.translation.mode === "automatic"}
+              liveService={liveTranslate && draft.translation.mode === "automatic" ? draft.asr.backend : undefined}
               profiles={translationProfiles}
               disabled={controlsDisabled}
               onChange={(microphone_targets) => updateTranslation({
@@ -88,7 +89,7 @@ export function TranslationSettingsSection({ draft, apiProfiles, saveState, appl
             <TranslationRouteList
               title={t("settings.translation.targetLanguageForOtherParty")}
               targets={draft.translation.speaker_targets}
-              liveTranslate={liveTranslate && draft.translation.mode === "automatic"}
+              liveService={liveTranslate && draft.translation.mode === "automatic" ? draft.asr.backend : undefined}
               profiles={translationProfiles}
               disabled={controlsDisabled}
               onChange={(speaker_targets) => updateTranslation({
