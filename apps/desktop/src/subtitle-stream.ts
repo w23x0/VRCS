@@ -146,6 +146,10 @@ function isConversationCatalog(value: unknown): value is ConversationCatalog {
 function isTranslation(value: unknown): value is SubtitleTranslation {
   return isObject(value)
     && isText(value.text)
+    && (value.source_group === undefined
+      || (isObject(value.source_group) && isText(value.source_group.text)
+        && Array.isArray(value.source_group.subtitle_ids) && value.source_group.subtitle_ids.length > 1
+        && value.source_group.subtitle_ids.every(isSubtitleId)))
     && isNullableText(value.source_language)
     && isText(value.target_language)
     && isText(value.provider)

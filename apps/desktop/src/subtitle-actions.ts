@@ -25,8 +25,19 @@ export function subtitleSelectionCopyText(
   subtitles: Subtitle[],
   mode: SubtitleCopyMode,
 ): string {
-  const original = combineSubtitleText(subtitles);
-  const translation = combineSubtitleTranslations(subtitles);
+  if (mode === "original") return combineSubtitleText(subtitles);
+  const seen = new Set<string>();
+  const grouped = chronologicalSubtitles(subtitles).flatMap((subtitle) => {
+    const translation = subtitle.translations.at(-1);
+    const group = translation?.source_group;
+    if (!group) return [subtitle];
+    const key = `${translation.target_language}:${group.subtitle_ids.join(",")}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [{ ...subtitle, text: group.text }];
+  });
+  const original = combineSubtitleText(grouped);
+  const translation = combineSubtitleTranslations(grouped);
   return subtitleCopyText(original, translation || null, mode);
 }
 

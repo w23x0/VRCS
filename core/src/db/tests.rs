@@ -367,6 +367,7 @@ fn subtitle_translation_is_saved_and_loaded() {
     let (_path, database) = open_temp_db("translation");
     let saved = database.add_subtitle(&subtitle("hello")).unwrap();
     let translation = SubtitleTranslation {
+        source_group: None,
         text: "你好".into(),
         source_language: Some("en".into()),
         target_language: "zh-Hans".into(),
@@ -396,6 +397,7 @@ fn subtitle_search_finds_originals_and_translations_without_duplicates() {
         .save_translation(
             first.id.unwrap(),
             &SubtitleTranslation {
+                source_group: None,
                 text: "I am going to the virtual market today".into(),
                 source_language: Some("ja".into()),
                 target_language: "en".into(),
@@ -524,6 +526,7 @@ fn subtitle_history_keeps_batched_translations_with_their_subtitles() {
     let (_path, database) = open_temp_db("history-translations");
     let older = database.add_subtitle(&subtitle("older")).unwrap();
     let older_translation = SubtitleTranslation {
+        source_group: None,
         text: "旧".into(),
         source_language: Some("en".into()),
         target_language: "zh-Hans".into(),
@@ -538,6 +541,7 @@ fn subtitle_history_keeps_batched_translations_with_their_subtitles() {
     let newer = database.add_subtitle(&subtitle("newer")).unwrap();
     let newer_translations = [
         SubtitleTranslation {
+            source_group: None,
             text: "新".into(),
             source_language: Some("en".into()),
             target_language: "zh-Hans".into(),
@@ -546,6 +550,7 @@ fn subtitle_history_keeps_batched_translations_with_their_subtitles() {
             created_at: now_iso8601(),
         },
         SubtitleTranslation {
+            source_group: None,
             text: "nouveau".into(),
             source_language: Some("en".into()),
             target_language: "fr".into(),
@@ -663,5 +668,65 @@ fn dictionary_import_flushes_full_and_partial_batches() {
                 .get::<_, i64>(0))
             .unwrap(),
         501
+    );
+}
+
+#[test]
+fn grouped_translation_roundtrips_and_rolls_back_all_members_on_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("group.db")).unwrap();
+    let first = db.add_subtitle(&subtitle("First.")).unwrap();
+    let second = db.add_subtitle(&subtitle("Second.")).unwrap();
+    let ids = vec![first.id.unwrap(), second.id.unwrap()];
+    let mut translation = SubtitleTranslation {
+        text: "Combined translation".into(),
+        source_language: Some("en".into()),
+        target_language: "zh-Hans".into(),
+        provider: "openai".into(),
+        model: None,
+        created_at: now_iso8601(),
+        source_group: Some(crate::models::TranslationSourceGroup {
+            subtitle_ids: ids.clone(),
+            text: "First. Second.".into(),
+        }),
+    };
+    db.save_translation_group(&ids, &translation).unwrap();
+    for row in db.subtitle_history(10).unwrap() {
+        assert_eq!(row.translations, vec![translation.clone()]);
+    }
+    assert_eq!(
+        db.subtitle(ids[0]).unwrap().unwrap().translations,
+        vec![translation.clone()]
+    );
+    db.conn.execute_batch(&format!("CREATE TRIGGER fail_second BEFORE INSERT ON subtitle_translations WHEN NEW.subtitle_id = {} BEGIN SELECT RAISE(FAIL, 'test failure'); END;", ids[1])).unwrap();
+    translation.text = "Must roll back".into();
+    assert!(db.save_translation_group(&ids, &translation).is_err());
+    for row in db.subtitle_history(10).unwrap() {
+        assert_eq!(row.translations[0].text, "Combined translation");
+    }
+}
+
+#[test]
+fn version_4_preserves_existing_version_3_subtitles() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("migration.db");
+    let db = Database::open(&path).unwrap();
+    let original = db.add_subtitle(&subtitle("Keep existing history")).unwrap();
+    db.conn
+        .execute_batch(
+            "ALTER TABLE subtitle_translations DROP COLUMN source_group; PRAGMA user_version = 3;",
+        )
+        .unwrap();
+    drop(db);
+    let db = Database::open(&path).unwrap();
+    assert_eq!(
+        db.subtitle(original.id.unwrap()).unwrap().unwrap().text,
+        original.text
+    );
+    assert_eq!(
+        db.conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+            .unwrap(),
+        4
     );
 }

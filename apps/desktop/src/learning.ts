@@ -29,7 +29,10 @@ export function buildSubtitleLearningCapture(
 
   const languages = new Set(ordered.map((subtitle) => subtitle.language));
   const translations = ordered
-    .map((subtitle) => subtitle.translations.at(-1)?.text.trim() ?? "")
+    .map((subtitle) => {
+      const translation = subtitle.translations.at(-1);
+      return translation?.source_group ? "" : translation?.text.trim() ?? "";
+    })
     .filter(Boolean);
   const sourceText = options.mergeFragments
     ? combineLearningSubtitleText(ordered)

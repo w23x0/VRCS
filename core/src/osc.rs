@@ -138,6 +138,7 @@ struct PendingMessage {
     preferred_target: Option<String>,
     desired_target: Option<String>,
     translations: HashMap<String, String>,
+    translation_originals: HashMap<String, String>,
     completed_targets: Vec<String>,
     expected_targets: Vec<String>,
     failed_targets: HashSet<String>,
@@ -522,6 +523,7 @@ fn reduce_received_event(
                 original: "VRCS OSC test".into(),
                 preferred_target: None,
                 desired_target: None,
+                translation_originals: HashMap::new(),
                 translations: HashMap::new(),
                 completed_targets: Vec::new(),
                 expected_targets: Vec::new(),
@@ -542,6 +544,7 @@ fn reduce_received_event(
                 original: String::new(),
                 preferred_target: None,
                 desired_target: None,
+                translation_originals: HashMap::new(),
                 translations: HashMap::new(),
                 completed_targets: Vec::new(),
                 expected_targets: Vec::new(),
@@ -578,6 +581,7 @@ fn reduce_received_event(
                     original: subtitle.text,
                     preferred_target,
                     desired_target,
+                    translation_originals: HashMap::new(),
                     translations: HashMap::new(),
                     completed_targets: Vec::new(),
                     expected_targets: target_languages,
@@ -632,12 +636,44 @@ fn reduce_translation_completed(
     preferred: bool,
     now: Instant,
 ) -> Vec<OscEffect> {
+    if let Some(group) = &translation.source_group {
+        if group.subtitle_ids.last().copied() != Some(subtitle_id) {
+            state.queue.retain_mut(|message| {
+                if message.subtitle_id != Some(subtitle_id) {
+                    return true;
+                }
+                let target = &translation.target_language;
+                message
+                    .expected_targets
+                    .retain(|language| language != target);
+                if message.expected_targets.is_empty() {
+                    return false;
+                }
+                if message.desired_target.as_ref() == Some(target) {
+                    message.desired_target = message.expected_targets.first().cloned();
+                }
+                if message.preferred_target.as_ref() == Some(target) {
+                    message.preferred_target = message.expected_targets.first().cloned();
+                }
+                if all_targets_resolved(message) {
+                    message.ready_at = now;
+                }
+                true
+            });
+            return Vec::new();
+        }
+    }
     if let Some(message) = state
         .queue
         .iter_mut()
         .find(|item| item.subtitle_id == Some(subtitle_id))
     {
         let language = translation.target_language.clone();
+        if let Some(group) = &translation.source_group {
+            message
+                .translation_originals
+                .insert(language.clone(), group.text.clone());
+        }
         if !message.translations.contains_key(&language) {
             message.completed_targets.push(language.clone());
         }
@@ -663,7 +699,7 @@ fn reduce_translation_completed(
     }
     let Some(sent) = state.current_sent.as_ref().filter(|sent| {
         sent.subtitle_id == subtitle_id
-            && sent.translation.is_none()
+            && sent.translation.as_deref() != Some(translation.text.as_str())
             && sent
                 .desired_target
                 .as_deref()
@@ -677,9 +713,14 @@ fn reduce_translation_completed(
         PendingMessage {
             message_id: sent.message_id.clone(),
             subtitle_id: Some(subtitle_id),
-            original: sent.original.clone(),
+            original: translation
+                .source_group
+                .as_ref()
+                .map(|group| group.text.clone())
+                .unwrap_or_else(|| sent.original.clone()),
             preferred_target: Some(translation.target_language.clone()),
             desired_target: Some(translation.target_language.clone()),
+            translation_originals: HashMap::new(),
             translations: HashMap::from([(translation.target_language.clone(), translation.text)]),
             completed_targets: vec![translation.target_language],
             expected_targets: Vec::new(),
@@ -718,7 +759,7 @@ fn reduce_tick(state: &mut OscWorkerState, now: Instant) -> Vec<OscEffect> {
         selected_translation_text(&message, &state.config.config.translation_strategy);
     let rendered_text = message.rendered_text.clone().unwrap_or_else(|| {
         format_chatbox(
-            &message.original,
+            selected_original(&message, &state.config.config.translation_strategy),
             translation.as_deref(),
             state.config.config.preserve_original_text,
         )
@@ -1006,7 +1047,8 @@ fn record_automatic_message(record: AutomaticMessageRecord<'_>) {
         return;
     }
     let Some(db) = db else { return };
-    let original = crate::chatbox::compact_text(&message.original);
+    let original =
+        crate::chatbox::compact_text(selected_original(message, formatting.translation_strategy));
     let translation = selected_translation_text(message, formatting.translation_strategy);
     let effective_translation = translation
         .as_deref()
@@ -1019,7 +1061,7 @@ fn record_automatic_message(record: AutomaticMessageRecord<'_>) {
     };
     let record = NewChatboxMessage {
         source: "microphone".into(),
-        original: message.original.clone(),
+        original: selected_original(message, formatting.translation_strategy).into(),
         translation,
         source_language: None,
         target_language: selected_target_language(message, formatting.translation_strategy),
@@ -1045,6 +1087,24 @@ fn record_automatic_message(record: AutomaticMessageRecord<'_>) {
             Err(error) => tracing::warn!("Failed to store automatic Chatbox history: {error}"),
         }
     }
+}
+
+fn selected_original<'a>(message: &'a PendingMessage, strategy: &str) -> &'a str {
+    if strategy == "all_languages" {
+        if let Some(original) = message
+            .completed_targets
+            .iter()
+            .find_map(|target| message.translation_originals.get(target))
+        {
+            return original;
+        }
+    } else if let Some(original) = selected_target_language(message, strategy)
+        .as_ref()
+        .and_then(|target| message.translation_originals.get(target))
+    {
+        return original;
+    }
+    &message.original
 }
 
 fn selected_translation(message: &PendingMessage) -> Option<&String> {
@@ -1195,6 +1255,7 @@ mod tests {
             original: "こんにちは".into(),
             preferred_target: targets.first().map(|target| (*target).into()),
             desired_target: None,
+            translation_originals: HashMap::new(),
             translations: HashMap::new(),
             completed_targets: Vec::new(),
             expected_targets: targets.iter().map(|target| (*target).into()).collect(),
@@ -1213,6 +1274,7 @@ mod tests {
             original: String::new(),
             preferred_target: None,
             desired_target: None,
+            translation_originals: HashMap::new(),
             translations: HashMap::new(),
             completed_targets: Vec::new(),
             expected_targets: Vec::new(),
@@ -1221,6 +1283,47 @@ mod tests {
             ready_at,
             responder: Some(responder),
         }
+    }
+
+    #[test]
+    fn shared_translation_sends_once_with_group_source_and_preserves_other_targets() {
+        let now = Instant::now();
+        let mut state = OscWorkerState::new(config_state());
+        for id in [1, 2] {
+            let mut message = pending_message(&["zh-Hans"]);
+            message.subtitle_id = Some(id);
+            state.queue.push_back(message);
+        }
+        let translation = SubtitleTranslation {
+            text: "你好，最近怎么样？".into(),
+            source_language: Some("en".into()),
+            target_language: "zh-Hans".into(),
+            provider: "openai".into(),
+            model: None,
+            created_at: now_iso8601(),
+            source_group: Some(crate::models::TranslationSourceGroup {
+                subtitle_ids: vec![1, 2],
+                text: "Hello. How are you?".into(),
+            }),
+        };
+        reduce_translation_completed(&mut state, 1, translation.clone(), true, now);
+        reduce_translation_completed(&mut state, 2, translation.clone(), true, now);
+        assert_eq!(state.queue.len(), 1);
+        let effects = reduce_tick(&mut state, now);
+        let OscEffect::Send(request) = &effects[0] else {
+            panic!()
+        };
+        assert_eq!(
+            request.rendered_text,
+            "Hello. How are you?\n你好，最近怎么样？"
+        );
+        assert!(state.queue.is_empty());
+        let mut extra = pending_message(&["zh-Hans", "ja"]);
+        extra.desired_target = Some("zh-Hans".into());
+        state.queue.push_back(extra);
+        reduce_translation_completed(&mut state, 1, translation, true, now);
+        assert_eq!(state.queue[0].expected_targets, ["ja"]);
+        assert_eq!(state.queue[0].desired_target.as_deref(), Some("ja"));
     }
 
     #[test]
@@ -1325,6 +1428,7 @@ mod tests {
                     generation: 0,
                     subtitle_id: 1,
                     translation: SubtitleTranslation {
+                        source_group: None,
                         text: "Hello".into(),
                         source_language: Some("ja".into()),
                         target_language: "en".into(),
@@ -1373,6 +1477,7 @@ mod tests {
             sent_at: now - LATE_TRANSLATION_TTL,
         });
         let translation = || SubtitleTranslation {
+            source_group: None,
             text: "Hello".into(),
             source_language: Some("ja".into()),
             target_language: "en".into(),
@@ -1392,6 +1497,36 @@ mod tests {
             now + Duration::from_millis(1),
         );
         assert!(state.queue.is_empty());
+    }
+
+    #[test]
+    fn a_late_sentence_continuation_updates_osc_without_replaying_identical_text() {
+        let now = Instant::now();
+        let mut state = OscWorkerState::new(config_state());
+        state.latest_subtitle_id = Some(1);
+        state.current_sent = Some(SentMessage {
+            message_id: "utterance-1".into(),
+            subtitle_id: 1,
+            original: "Hello".into(),
+            desired_target: Some("zh-Hans".into()),
+            translation: Some("你好。".into()),
+            sent_at: now,
+        });
+        let mut translation = SubtitleTranslation {
+            source_group: None,
+            text: "你好。".into(),
+            source_language: Some("en".into()),
+            target_language: "zh-Hans".into(),
+            provider: "openai".into(),
+            model: None,
+            created_at: now_iso8601(),
+        };
+        reduce_translation_completed(&mut state, 1, translation.clone(), true, now);
+        assert!(state.queue.is_empty());
+        translation.text.push_str(" 还好吗？");
+        reduce_translation_completed(&mut state, 1, translation, true, now);
+        assert_eq!(state.queue.len(), 1);
+        assert_eq!(state.queue[0].translations["zh-Hans"], "你好。 还好吗？");
     }
 
     #[test]
@@ -1430,6 +1565,7 @@ mod tests {
                 original: "こんにちは".into(),
                 preferred_target: Some("en".into()),
                 desired_target: Some("en".into()),
+                translation_originals: HashMap::new(),
                 translations: HashMap::from([("en".into(), "Hello".into())]),
                 completed_targets: vec!["en".into()],
                 expected_targets: vec!["en".into()],
@@ -1652,6 +1788,7 @@ mod tests {
         dispatcher.translation_completed(
             2,
             SubtitleTranslation {
+                source_group: None,
                 text: "你好".into(),
                 source_language: Some("ja".into()),
                 target_language: "zh-Hans".into(),
@@ -1690,6 +1827,7 @@ mod tests {
         dispatcher.translation_completed(
             3,
             SubtitleTranslation {
+                source_group: None,
                 text: "你好".into(),
                 source_language: Some("ja".into()),
                 target_language: "zh-Hans".into(),
@@ -1734,6 +1872,7 @@ mod tests {
             dispatcher.translation_completed(
                 4,
                 SubtitleTranslation {
+                    source_group: None,
                     text: text.into(),
                     source_language: Some("ja".into()),
                     target_language: target_language.into(),

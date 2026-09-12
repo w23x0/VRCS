@@ -154,3 +154,16 @@ test("merges status pages by id, keeps updates, and sorts newest first", () => {
   assert.equal(learningItemMatchesStatus(merged[1], "collected"), false);
   assert.equal(learningItemMatchesStatus(merged[1], "all"), true);
 });
+
+
+test("a sentence capture does not mislabel a shared group translation as its own", () => {
+  const capture = buildSubtitleLearningCapture([subtitle({
+    id: 1, text: "Hello.", created_at: "2026-01-01T00:00:00Z",
+    translations: [{
+      text: "Combined", source_language: "en", target_language: "zh-Hans", provider: "openai", model: null,
+      created_at: "2026-01-01T00:00:00Z", source_group: { subtitle_ids: [1, 2], text: "Hello. Next." },
+    }],
+  })]);
+  assert.equal(capture?.source_text, "Hello.");
+  assert.equal(capture?.source_translation, null);
+});

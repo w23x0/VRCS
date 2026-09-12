@@ -70,7 +70,9 @@ pub fn openai_translation_language(language: &str) -> Result<&str, String> {
     if LANGUAGES.split_whitespace().any(|code| code == wire) {
         Ok(wire)
     } else {
-        Err(format!("Unsupported OpenAI Realtime Translation target language: {language}"))
+        Err(format!(
+            "Unsupported OpenAI Realtime Translation target language: {language}"
+        ))
     }
 }
 
@@ -95,7 +97,11 @@ const OPENAI_MODELS: &[&str] = &[];
 const QWEN_MODELS: &[&str] = &["qwen3-asr-flash-realtime"];
 const FUN_ASR_MODELS: &[&str] = &["qwen-audio-3.0-asr-flash-streaming", "fun-asr-realtime"];
 const TOKEN_PLAN_REALTIME_MODELS: &[&str] = &["qwen-audio-3.0-realtime-plus"];
-const OPENAI_ASR_MODELS: &[&str] = &["gpt-live-transcribe","gpt-4o-mini-transcribe", "gpt-4o-transcribe"];
+const OPENAI_ASR_MODELS: &[&str] = &[
+    "gpt-live-transcribe",
+    "gpt-4o-mini-transcribe",
+    "gpt-4o-transcribe",
+];
 const GROQ_ASR_MODELS: &[&str] = &["whisper-large-v3-turbo", "whisper-large-v3"];
 const GEMINI_ASR_MODELS: &[&str] = &["gemini-3.5-transcribe-live"];
 

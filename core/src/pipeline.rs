@@ -394,7 +394,9 @@ enum RecognitionBackend {
 
 enum PipelineEffect {
     PublishNativeTranslation(crate::asr::LiveTranslationResult),
+    PublishNativeTranslationUpdate(crate::asr::LiveTranslationResult),
     PublishLiveTranslation(crate::models::LiveTranslation),
+    CancelLiveTranslation(String),
     PublishPartial {
         utterance_id: String,
         text: String,
@@ -506,6 +508,7 @@ fn reduce_cloud_event(
         CloudEvent::LiveTranslation {
             snapshot,
             completed,
+            translations,
         } => {
             let mut effects = Vec::new();
             for result in completed {
@@ -516,7 +519,15 @@ fn reduce_cloud_event(
                     effects.push(PipelineEffect::PublishNativeTranslation(result));
                 }
             }
+            effects.extend(
+                translations
+                    .into_iter()
+                    .map(PipelineEffect::PublishNativeTranslationUpdate),
+            );
             if snapshot.text.is_empty() && snapshot.translation.is_empty() {
+                if state.lifecycle.accept_final(&snapshot.utterance_id) {
+                    effects.push(PipelineEffect::CancelLiveTranslation(snapshot.utterance_id));
+                }
                 return effects;
             }
             if echo_guard.suppresses_partial(&snapshot.text)
@@ -696,6 +707,15 @@ impl PipelineEffectRunner<'_> {
                         .publish_native_translation(self.source, result)
                         .await?;
                 }
+            }
+            PipelineEffect::PublishNativeTranslationUpdate(update) => {
+                self.dependencies
+                    .publish_native_translation_update(self.source, update)
+                    .await?;
+            }
+            PipelineEffect::CancelLiveTranslation(id) => {
+                self.dependencies
+                    .cancel_recognition(&id, self.source, "completed")
             }
             PipelineEffect::PublishLiveTranslation(snapshot) => self
                 .dependencies

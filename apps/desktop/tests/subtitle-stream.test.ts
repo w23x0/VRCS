@@ -423,3 +423,14 @@ test("native bilingual snapshots require both text fields and a source", () => {
   assert.equal(parseSubtitleStreamMessage(JSON.stringify({ ...snapshot, translation: 42 })), null);
   assert.equal(parseSubtitleStreamMessage(JSON.stringify({ ...snapshot, source: "invalid" })), null);
 });
+
+test("shared source context survives protocol validation and history reconciliation", () => {
+  const translation = {
+    text: "Combined", source_language: "en", target_language: "zh-Hans", provider: "openai",
+    model: null, created_at: "2026-01-01T00:00:00Z", source_group: { subtitle_ids: [1, 2], text: "Hello. Next." },
+  };
+  const event = { type: "translation_completed", subtitle_id: 1, translation };
+  assert.deepEqual(parseSubtitleStreamMessage(JSON.stringify(event)), event);
+  const invalid = { ...event, translation: { ...translation, source_group: { subtitle_ids: ["1"], text: "Hello" } } };
+  assert.equal(parseSubtitleStreamMessage(JSON.stringify(invalid)), null);
+});

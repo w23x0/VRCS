@@ -134,6 +134,7 @@ fn conversation_subtitle(message: &ChatboxMessage) -> Subtitle {
         "bilingual" => {
             if let Some(translation) = message.translation.as_deref() {
                 translations.push(SubtitleTranslation {
+                    source_group: None,
                     text: translation.trim().to_owned(),
                     source_language: message.source_language.clone(),
                     target_language: message

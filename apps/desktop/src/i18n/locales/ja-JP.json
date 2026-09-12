@@ -224,6 +224,7 @@
       }
     },
     "live": {
+      "sharedTranslation": "まとめた訳文 · {{count}} 文",
       "title": "リアルタイム字幕",
       "listening": "音声を待っています…",
       "startHint": "文字起こしを開始すると、ここに字幕が表示されます。",

@@ -84,10 +84,10 @@ pub(super) fn normalize_event(
     let delta = value["delta"].as_str().unwrap_or_default();
     match value["type"].as_str() {
         Some("session.input_transcript.delta") => {
-            live_translation::append(config, state, delta, "", None)
+            live_translation::append_timed(config, state, delta, "")
         }
         Some("session.output_transcript.delta") => {
-            live_translation::append(config, state, "", delta, None)
+            live_translation::append_timed(config, state, "", delta)
         }
         Some("error") => {
             // A recoverable session error must not terminate the current subtitle.
@@ -193,35 +193,242 @@ mod tests {
     }
 
     #[test]
-    fn independent_deltas_keep_repetitions_and_ignore_audio_and_timestamps() {
+    fn independent_deltas_keep_repetitions_in_one_stable_window() {
         let config = config();
         let mut state = live_translation::State::default();
         let mut results = Vec::new();
-        for (kind, delta) in [
-            ("output_transcript", "你好。"),
-            ("input_transcript", "hello"),
-            ("output_audio", "SGVsbG8="),
-            ("input_transcript", " hello."),
-            ("input_transcript", " Value 3."),
-            ("input_transcript", "14."),
-            ("output_transcript", "数值3.14。"),
+        let mut translated = Vec::new();
+        for (kind, delta, frame) in [
+            ("output_transcript", "你好", 400),
+            ("input_transcript", "hello", 200),
+            ("output_audio", "SGVsbG8=", 400),
+            ("input_transcript", " hello.", 400),
+            ("input_transcript", " Value 3.", 1000),
+            ("input_transcript", "14.", 1200),
+            ("output_transcript", "数值3.14", 1400),
         ] {
-            if let Some(CloudEvent::LiveTranslation { completed, .. }) = normalize_event(&config, &json!({"type": format!("session.{kind}.delta"), "delta": delta, "elapsed_ms": 200}), &mut state).unwrap() {
+            if let Some(CloudEvent::LiveTranslation { completed, translations, .. }) = normalize_event(&config, &json!({"type": format!("session.{kind}.delta"), "delta": delta, "elapsed_ms": frame}), &mut state).unwrap() {
                 results.extend(completed);
+                translated.extend(translations.into_iter().filter(|update| !update.pending));
             }
         }
-        if let Some(CloudEvent::LiveTranslation { completed, .. }) =
-            live_translation::finish(&config, &mut state)
+        if let Some(CloudEvent::LiveTranslation {
+            completed,
+            translations,
+            ..
+        }) = live_translation::finish(&config, &mut state)
         {
             results.extend(completed);
+            translated.extend(translations);
         }
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].transcript.text, "hello hello. Value 3.14.");
-        assert_eq!(results[0].transcript.translation, "你好。数值3.14。");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].transcript.text, "hello hello.");
+        assert_eq!(results[1].transcript.text, "Value 3.14.");
+        assert_eq!(translated.len(), 1);
+        assert_eq!(translated[0].transcript.text, "hello hello. Value 3.14.");
+        assert_eq!(translated[0].transcript.translation, "你好数值3.14");
+        assert_eq!(
+            translated[0].source_utterance_ids,
+            results
+                .iter()
+                .map(|source| source.transcript.utterance_id.clone())
+                .collect::<Vec<_>>()
+        );
         assert!(results.iter().all(|r| r.provider == "openai"
             && r.model == "gpt-realtime-translate"
             && r.transcript.language.is_none()));
         assert!(live_translation::finish(&config, &mut state).is_none());
+    }
+
+    #[test]
+    fn missing_frames_keep_a_stable_one_to_one_window() {
+        let mut state = live_translation::State::default();
+        for event in [
+            json!({"type":"session.input_transcript.delta","delta":"Hello."}),
+            json!({"type":"session.output_transcript.delta","delta":"你好"}),
+        ] {
+            normalize_event(&config(), &event, &mut state).unwrap();
+        }
+        let Some(CloudEvent::LiveTranslation { translations, .. }) =
+            live_translation::finish(&config(), &mut state)
+        else {
+            panic!()
+        };
+        assert_eq!(translations.len(), 1);
+        assert_eq!(translations[0].transcript.translation, "你好");
+    }
+
+    #[tokio::test]
+    async fn source_idle_waits_for_a_translation_that_has_not_started() {
+        let mut state = live_translation::State::default();
+        normalize_event(
+            &config(),
+            &json!({"type":"session.input_transcript.delta", "delta":"Hello.", "elapsed_ms":200}),
+            &mut state,
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1550)).await;
+        let Some(CloudEvent::LiveTranslation {
+            completed,
+            translations,
+            ..
+        }) = live_translation::poll(&config(), &mut state)
+        else {
+            panic!()
+        };
+        assert_eq!(completed.len(), 1);
+        assert!(translations.is_empty());
+        let id = completed[0].transcript.utterance_id.clone();
+        let Some(CloudEvent::LiveTranslation {
+            snapshot,
+            translations,
+            ..
+        }) = normalize_event(
+            &config(),
+            &json!({"type":"session.output_transcript.delta", "delta":"你好", "elapsed_ms":400}),
+            &mut state,
+        )
+        .unwrap()
+        else {
+            panic!()
+        };
+        assert!(snapshot.translation.is_empty());
+        assert_eq!(translations.len(), 1);
+        assert!(translations[0].pending);
+        assert_eq!(translations[0].transcript.utterance_id, id);
+        assert_eq!(translations[0].transcript.translation, "你好");
+        let Some(CloudEvent::LiveTranslation { translations, .. }) =
+            live_translation::finish(&config(), &mut state)
+        else {
+            panic!()
+        };
+        assert_eq!(translations[0].transcript.translation, "你好");
+        assert_eq!(translations[0].transcript.utterance_id, id);
+        assert!(!translations[0].pending);
+    }
+
+    #[tokio::test]
+    async fn captured_arrival_timing_does_not_split_or_shift_sentences() {
+        replay_capture(
+            include_str!("fixtures/openai_translation_frames.json"),
+            &[
+                "桌子上的红盒子",
+                "请开窗",
+                "我今天待在家里因为我觉得很累",
+                "明天我们三点见",
+                "蓝色火车七点开走",
+                "谢谢你",
+                "谢谢你",
+                "请带两个苹果和一瓶水",
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn captured_translation_can_finish_after_the_next_two_sources_start() {
+        replay_capture(
+            include_str!("fixtures/openai_translation_delayed.json"),
+            &[
+                "你好,虽然会议原定在周一早上,我们还是决定改到周五下午,因为经理还在路上。",
+                "请等一下。",
+                "把门关上。",
+                "我昨天买了一把红伞和一本蓝色笔记本,但忘了带回家。",
+                "谢谢。",
+                "谢谢。",
+                "火车七点发车。",
+                "请带两个苹果和一瓶水。",
+            ],
+        )
+        .await;
+    }
+
+    async fn replay_capture(capture: &str, expected: &[&str]) {
+        let events: Vec<Value> = serde_json::from_str(capture).unwrap();
+        let mut state = live_translation::State::default();
+        let config = config();
+        let start = tokio::time::Instant::now();
+        let first = events[0]["received_ms"].as_u64().unwrap();
+        let mut originals = Vec::new();
+        let mut updates = Vec::new();
+        let mut collect = |event| {
+            if let Some(CloudEvent::LiveTranslation {
+                completed,
+                translations,
+                ..
+            }) = event
+            {
+                originals.extend(completed);
+                updates.extend(translations.into_iter().filter(|t| !t.pending));
+            }
+        };
+        for event in events {
+            let due = start
+                + std::time::Duration::from_millis(event["received_ms"].as_u64().unwrap() - first);
+            while tokio::time::Instant::now() < due {
+                tokio::time::sleep_until(
+                    due.min(tokio::time::Instant::now() + std::time::Duration::from_millis(100)),
+                )
+                .await;
+                collect(live_translation::poll(&config, &mut state));
+            }
+            collect(normalize_event(&config, &event, &mut state).unwrap());
+        }
+        collect(live_translation::finish(&config, &mut state));
+        assert_eq!(originals.len(), expected.len());
+        if updates.len() == 1 && updates[0].source_utterance_ids.len() == originals.len() {
+            assert_eq!(
+                updates[0].source_utterance_ids,
+                originals
+                    .iter()
+                    .map(|original| original.transcript.utterance_id.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                updates[0].transcript.translation.replace(' ', ""),
+                expected.concat().replace(' ', "")
+            );
+        } else {
+            assert_eq!(updates.len(), expected.len());
+            for ((original, update), expected) in originals.iter().zip(&updates).zip(expected) {
+                assert_eq!(
+                    original.transcript.utterance_id,
+                    update.transcript.utterance_id
+                );
+                assert_eq!(update.transcript.translation, *expected);
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_translation_falls_back_to_one_shared_window() {
+        let mut state = live_translation::State::default();
+        let mut updates = Vec::new();
+        for (kind, text, frame) in [
+            ("input", "First.", 200),
+            ("output", "第一句", 400),
+            ("input", " Missing.", 1000),
+            ("input", " Third.", 2000),
+            ("output", "第三句。还有补充。", 2400),
+        ] {
+            if let Some(CloudEvent::LiveTranslation { translations, .. }) = normalize_event(
+                &config(), &json!({"type": format!("session.{kind}_transcript.delta"), "delta": text, "elapsed_ms": frame}), &mut state,
+            ).unwrap() {
+                updates.extend(translations.into_iter().filter(|t| !t.pending));
+            }
+        }
+        if let Some(CloudEvent::LiveTranslation { translations, .. }) =
+            live_translation::finish(&config(), &mut state)
+        {
+            updates.extend(translations);
+        }
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].source_utterance_ids.len(), 3);
+        assert_eq!(updates[0].transcript.text, "First. Missing. Third.");
+        assert_eq!(
+            updates[0].transcript.translation,
+            "第一句第三句。 还有补充。"
+        );
     }
 
     #[test]

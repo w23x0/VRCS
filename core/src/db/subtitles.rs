@@ -10,7 +10,7 @@ const HISTORY_SQL: &str = "SELECT recent.id, recent.conversation_id, recent.text
             recent.started_at, recent.ended_at, recent.source, recent.created_at,
             translation.id, translation.text, translation.source_language,
             translation.target_language, translation.provider,
-            translation.model, translation.created_at
+            translation.model, translation.created_at, translation.source_group
      FROM (
          SELECT id, conversation_id, text, language, started_at, ended_at, source, created_at
          FROM subtitles
@@ -25,7 +25,7 @@ const HISTORY_BEFORE_SQL: &str =
             recent.started_at, recent.ended_at, recent.source, recent.created_at,
             translation.id, translation.text, translation.source_language,
             translation.target_language, translation.provider,
-            translation.model, translation.created_at
+            translation.model, translation.created_at, translation.source_group
      FROM (
          SELECT id, conversation_id, text, language, started_at, ended_at, source, created_at
          FROM subtitles
@@ -41,7 +41,7 @@ const CONVERSATION_HISTORY_SQL: &str =
             recent.started_at, recent.ended_at, recent.source, recent.created_at,
             translation.id, translation.text, translation.source_language,
             translation.target_language, translation.provider,
-            translation.model, translation.created_at
+            translation.model, translation.created_at, translation.source_group
      FROM (
          SELECT id, conversation_id, text, language, started_at, ended_at, source, created_at
          FROM subtitles
@@ -57,7 +57,7 @@ const CONVERSATION_HISTORY_BEFORE_SQL: &str =
             recent.started_at, recent.ended_at, recent.source, recent.created_at,
             translation.id, translation.text, translation.source_language,
             translation.target_language, translation.provider,
-            translation.model, translation.created_at
+            translation.model, translation.created_at, translation.source_group
      FROM (
          SELECT id, conversation_id, text, language, started_at, ended_at, source, created_at
          FROM subtitles
@@ -232,7 +232,7 @@ impl Database {
                     subtitle.started_at, subtitle.ended_at, subtitle.source, subtitle.created_at,
                     translation.id, translation.text, translation.source_language,
                     translation.target_language, translation.provider,
-                    translation.model, translation.created_at
+                    translation.model, translation.created_at, translation.source_group
              FROM subtitles AS subtitle
              LEFT JOIN subtitle_translations AS translation
                ON translation.subtitle_id = subtitle.id
@@ -301,6 +301,7 @@ where
         let subtitle = subtitle_from_row(row)?;
         let translation = if row.get::<_, Option<i64>>(8)?.is_some() {
             Some(SubtitleTranslation {
+                source_group: super::translations::read_source_group(row, 15)?,
                 text: row.get(9)?,
                 source_language: row.get(10)?,
                 target_language: row.get(11)?,

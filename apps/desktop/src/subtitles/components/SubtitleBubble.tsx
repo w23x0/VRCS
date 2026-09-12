@@ -72,7 +72,12 @@ export const SubtitleBubble = memo(function SubtitleBubble({
   const source: SubtitleSource = subtitle.source ?? "speaker";
   const mine = source !== "speaker";
   const translationPartials = useTranslationPartials(subtitle.id);
-  const completedTranslation = subtitle.translations[0];
+  const completedTranslations = subtitle.translations.filter(
+    (translation) =>
+      !translation.source_group
+      || translation.source_group.subtitle_ids.at(-1) === subtitle.id,
+  );
+  const completedTranslation = completedTranslations[0];
   const fallbackPartial = subtitle.translation_partial
     ? [{ ...subtitle.translation_partial, preferred: true }]
     : [];
@@ -80,7 +85,7 @@ export const SubtitleBubble = memo(function SubtitleBubble({
   const partialLanguages = new Set(activePartials.map((partial) => partial.target_language));
   const visibleTranslations = [
     ...activePartials,
-    ...subtitle.translations.filter(
+    ...completedTranslations.filter(
       (translation) => !partialLanguages.has(translation.target_language),
     ),
   ];
@@ -107,7 +112,9 @@ export const SubtitleBubble = memo(function SubtitleBubble({
     language: subtitle.language,
     source: subtitle.source ?? null,
     createdAt: subtitle.created_at,
-    translation: visibleTranslations[0]?.text ?? null,
+    translation: completedTranslation?.source_group
+      ? null
+      : visibleTranslations[0]?.text ?? null,
   };
 
   useEffect(() => {
@@ -129,7 +136,13 @@ export const SubtitleBubble = memo(function SubtitleBubble({
   const copySubtitle = (mode: SubtitleCopyMode) => {
     const text = selectionMode
       ? subtitleSelectionCopyText(selection!, mode)
-      : subtitleCopyText(subtitle.text, completedTranslation?.text ?? null, mode);
+      : subtitleCopyText(
+          mode === "bilingual"
+            ? completedTranslation?.source_group?.text ?? subtitle.text
+            : subtitle.text,
+          completedTranslation?.text ?? null,
+          mode,
+        );
     void copyText(text);
   };
 
@@ -205,8 +218,18 @@ export const SubtitleBubble = memo(function SubtitleBubble({
               const streaming = activePartials.some(
                 (partial) => partial.target_language === translation.target_language,
               );
+              const group = "source_group" in translation ? translation.source_group : undefined;
               return (
-                <p className={`bubble-translation ${streaming ? "streaming-translation" : ""}`} lang={contentLanguageTag(translation.target_language)} key={translation.target_language}>
+                <p
+                  className={`bubble-translation ${streaming ? "streaming-translation" : ""}`}
+                  lang={contentLanguageTag(translation.target_language)}
+                  key={translation.target_language}
+                >
+                  {group && (
+                    <small className="bubble-translation-group" title={group.text}>
+                      {t("live.sharedTranslation", { count: group.subtitle_ids.length })}
+                    </small>
+                  )}
                   {translation.text}
                   {streaming && <span className="streaming-ellipsis" aria-hidden="true">…</span>}
                 </p>

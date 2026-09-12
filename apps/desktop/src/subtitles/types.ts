@@ -17,6 +17,7 @@ export interface Subtitle {
 }
 
 export interface SubtitleTranslation {
+  source_group?: { subtitle_ids: number[]; text: string };
   text: string;
   source_language: string | null;
   target_language: string;

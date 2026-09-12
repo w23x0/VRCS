@@ -24,7 +24,7 @@ const SEED_ENTRIES: [(&str, &str, &str); 4] = [
     ("ありがとう", "ja", "谢谢"),
 ];
 
-const LATEST_SCHEMA_VERSION: u32 = 3;
+const LATEST_SCHEMA_VERSION: u32 = 4;
 
 const MIGRATION_1_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS subtitles (
@@ -168,6 +168,15 @@ impl Database {
         }
         if version < 3 {
             self.migrate_to_version_3()?;
+        }
+        if version < 4 {
+            let transaction = self.conn.transaction()?;
+            transaction.execute(
+                "ALTER TABLE subtitle_translations ADD COLUMN source_group TEXT",
+                [],
+            )?;
+            transaction.pragma_update(None, "user_version", 4)?;
+            transaction.commit()?;
         }
 
         self.initialize_learning_storage()?;

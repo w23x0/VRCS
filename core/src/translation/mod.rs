@@ -38,6 +38,7 @@ pub struct TranslationResult {
 impl TranslationResult {
     pub fn into_record(self) -> SubtitleTranslation {
         SubtitleTranslation {
+            source_group: None,
             text: self.text,
             source_language: self.source_language,
             target_language: self.target_language,

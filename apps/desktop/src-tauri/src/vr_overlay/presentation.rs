@@ -59,6 +59,7 @@ struct PresentationItem {
 
 #[derive(Debug, Clone)]
 struct PresentationTranslation {
+    original: Option<String>,
     target_language: String,
     text: String,
     preferred: bool,
@@ -120,6 +121,7 @@ impl HeadsetPresentation {
                 );
                 if config.show_translation_partials && !snapshot.translation.is_empty() {
                     item.translations.push(PresentationTranslation {
+                        original: None,
                         target_language: snapshot.target_language,
                         text: snapshot.translation,
                         preferred: true,
@@ -282,6 +284,7 @@ impl WristPresentation {
                 );
                 if config.show_translation_partials && !snapshot.translation.is_empty() {
                     item.translations.push(PresentationTranslation {
+                        original: None,
                         target_language: snapshot.target_language,
                         text: snapshot.translation,
                         preferred: true,
@@ -470,8 +473,19 @@ fn item_from_subtitle(
         .iter()
         .enumerate()
         .filter_map(|(index, translation)| {
+            if translation
+                .source_group
+                .as_ref()
+                .is_some_and(|group| group.subtitle_ids.last().copied() != subtitle.id)
+            {
+                return None;
+            }
             visible_translation(subtitle.language.as_deref(), translation).map(|text| {
                 PresentationTranslation {
+                    original: translation
+                        .source_group
+                        .as_ref()
+                        .map(|group| group.text.clone()),
                     target_language: translation.target_language.clone(),
                     text,
                     preferred: index == 0,
@@ -528,12 +542,27 @@ fn update_completed_translation(
     preferred: bool,
 ) -> bool {
     let target_language = translation.target_language.clone();
+    if translation
+        .source_group
+        .as_ref()
+        .is_some_and(|group| group.subtitle_ids.last().copied() != item.subtitle_id)
+    {
+        return false;
+    }
     let Some(text) = visible_translation(item.language.as_deref(), &translation) else {
         item.translations
             .retain(|current| current.target_language != target_language);
         return false;
     };
-    update_translation(item, target_language, text, preferred)
+    let updated = update_translation(item, target_language.clone(), text, preferred);
+    if let Some(current) = item
+        .translations
+        .iter_mut()
+        .find(|current| current.target_language == target_language)
+    {
+        current.original = translation.source_group.map(|group| group.text);
+    }
+    updated
 }
 
 fn update_translation(
@@ -564,6 +593,7 @@ fn update_translation(
         translation.preferred |= preferred;
     } else {
         item.translations.push(PresentationTranslation {
+            original: None,
             target_language,
             text,
             preferred,
@@ -628,7 +658,15 @@ fn display_text(
     match mode {
         "translation" => translation.unwrap_or_else(|| item.original.clone()),
         "bilingual" => translation
-            .map(|text| format!("{}{separator}{text}", item.original))
+            .map(|text| {
+                format!(
+                    "{}{separator}{text}",
+                    translations
+                        .iter()
+                        .find_map(|translation| translation.original.as_deref())
+                        .unwrap_or(&item.original)
+                )
+            })
             .unwrap_or_else(|| item.original.clone()),
         _ => item.original.clone(),
     }

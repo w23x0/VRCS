@@ -158,34 +158,74 @@ mod tests {
 
     #[test]
     fn real_continuous_stream_preserves_both_complete_texts() {
-        // Synthetic English speech, live service capture on 2026-09-05.
-        // Audio and transport metadata are excluded from this fixture.
         let messages: Vec<Value> =
             serde_json::from_str(include_str!("fixtures/gemini_live_translate.json")).unwrap();
         let mut state = State::default();
         let mut results = Vec::new();
+        let mut translated = std::collections::HashMap::new();
         for message in messages {
-            let event = normalize_event(&config(), &message, &mut state).unwrap();
-            let Some(CloudEvent::LiveTranslation { completed, .. }) = event else {
-                panic!("expected independent stream update");
-            };
-            results.extend(completed);
+            if let Some(CloudEvent::LiveTranslation {
+                completed,
+                translations,
+                ..
+            }) = normalize_event(&config(), &message, &mut state).unwrap()
+            {
+                results.extend(completed);
+                for update in translations.into_iter().filter(|update| !update.pending) {
+                    translated.insert(
+                        update.transcript.utterance_id,
+                        update.transcript.translation,
+                    );
+                }
+            }
         }
-        assert!(results.is_empty());
+        assert!(
+            !results.is_empty(),
+            "continuous speech must finalize source sentences"
+        );
+        assert!(
+            !translated.is_empty(),
+            "continuous translation must complete individual sentences"
+        );
         let CloudEvent::LiveTranslation {
             completed,
             snapshot,
+            translations,
         } = finish(&config(), &mut state).unwrap()
         else {
             panic!()
         };
-        assert_eq!(completed.len(), 1);
-        let expected_input = messages_text("inputTranscription");
-        let expected_output = messages_text("outputTranscription");
-        assert_eq!(completed[0].transcript.text, expected_input.trim());
-        assert_eq!(completed[0].transcript.translation, expected_output.trim());
-        assert!(snapshot.text.is_empty());
-        assert!(snapshot.translation.is_empty());
+        results.extend(completed);
+        for update in translations {
+            translated.insert(
+                update.transcript.utterance_id,
+                update.transcript.translation,
+            );
+        }
+        let source = results
+            .iter()
+            .map(|r| r.transcript.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            source.split_whitespace().collect::<String>(),
+            messages_text("inputTranscription")
+                .split_whitespace()
+                .collect::<String>()
+        );
+        let target = results
+            .iter()
+            .filter_map(|r| translated.get(&r.transcript.utterance_id))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            target.split_whitespace().collect::<String>(),
+            messages_text("outputTranscription")
+                .split_whitespace()
+                .collect::<String>()
+        );
+        assert!(snapshot.text.is_empty() && snapshot.translation.is_empty());
         assert_eq!(snapshot.language.as_deref(), Some("en"));
     }
 
@@ -203,15 +243,10 @@ mod tests {
         let mut state = State::default();
         for (input, output, expected_input, expected_output) in [
             ("Hello.", "你好。", "Hello.", "你好。"),
-            (" Next", "", "Hello. Next", "你好。"),
-            (" sentence.", "下一", "Hello. Next sentence.", "你好。下一"),
-            ("", "句。", "Hello. Next sentence.", "你好。下一句。"),
-            (
-                "",
-                "再见。新的",
-                "Hello. Next sentence.",
-                "你好。下一句。再见。新的",
-            ),
+            (" Next", "", "Next", ""),
+            (" sentence.", "下一", "Next sentence.", "下一"),
+            ("", "句。", "Next sentence.", "下一句。"),
+            ("", "再见。新的", "Next sentence.", "下一句。再见。新的"),
         ] {
             let event = normalize_event(
                 &config(),
@@ -270,19 +305,24 @@ mod tests {
         let CloudEvent::LiveTranslation {
             snapshot,
             completed,
+            ..
         } = event
         else {
             panic!()
         };
         assert!(completed.is_empty());
         assert!(snapshot.text.chars().count() <= MAX_DISPLAY_CHARS);
-        let CloudEvent::LiveTranslation { completed, .. } = finish(&config(), &mut state).unwrap()
+        let CloudEvent::LiveTranslation {
+            completed,
+            translations,
+            ..
+        } = finish(&config(), &mut state).unwrap()
         else {
             panic!()
         };
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0].transcript.text, original.trim());
-        assert_eq!(completed[0].transcript.translation, translated);
+        assert_eq!(translations[0].transcript.translation, translated);
         assert!(finish(&config(), &mut state).is_none());
     }
 
@@ -343,7 +383,7 @@ mod tests {
             panic!()
         };
         assert_eq!(completed.len(), 1);
-        assert_eq!(completed[0].transcript.text, "Hello. Tail");
+        assert_eq!(completed[0].transcript.text, "Tail");
         assert!(completed
             .iter()
             .all(|result| result.transcript.translation.is_empty()));

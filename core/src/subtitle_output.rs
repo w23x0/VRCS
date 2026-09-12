@@ -412,6 +412,7 @@ mod tests {
             "speaker",
         );
         let translation = SubtitleTranslation {
+            source_group: None,
             text: "你好".into(),
             source_language: Some("en".into()),
             target_language: "zh-Hans".into(),
@@ -465,6 +466,7 @@ mod tests {
             "speaker",
         );
         let translation = SubtitleTranslation {
+            source_group: None,
             text: "こんにちは".into(),
             source_language: Some("en".into()),
             target_language: "ja".into(),

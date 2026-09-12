@@ -123,3 +123,4 @@ button.subtitle-analysis-feedback:active { transform: scale(0.96); }
 .empty-state p { margin: 0; font-size: 13px; }
 .workspace-live > .conversation > .empty-state { flex: 1; transform: translateY(-12px); }
 
+.bubble-translation-group { display: block; margin-bottom: 4px; color: var(--text-quiet); font-size: 0.8em; }

@@ -44,3 +44,17 @@ function subtitle(overrides: Partial<Subtitle>): Subtitle {
     ...overrides,
   };
 }
+
+
+test("copies a shared translation once with its complete source context", () => {
+  const translation = {
+    text: "你好，最近怎么样？", source_language: "en", target_language: "zh-Hans",
+    provider: "openai" as const, model: null, created_at: "2026-01-01T00:00:00Z",
+    source_group: { subtitle_ids: [1, 2], text: "Hello. How are you?" },
+  };
+  const first = subtitle({ id: 1, text: "Hello.", translations: [translation] });
+  const second = subtitle({ id: 2, text: "How are you?", translations: [translation] });
+  assert.equal(subtitleSelectionCopyText([first, second], "translation"), translation.text);
+  assert.equal(subtitleSelectionCopyText([second], "bilingual"), `${translation.source_group.text}\n${translation.text}`);
+  assert.equal(subtitleSelectionCopyText([second], "original"), second.text);
+});

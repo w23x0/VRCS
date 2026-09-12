@@ -29,6 +29,8 @@ pub struct Subtitle {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubtitleTranslation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_group: Option<TranslationSourceGroup>,
     pub text: String,
     pub source_language: Option<String>,
     pub target_language: String,
@@ -36,6 +38,12 @@ pub struct SubtitleTranslation {
     #[serde(default)]
     pub model: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TranslationSourceGroup {
+    pub subtitle_ids: Vec<i64>,
+    pub text: String,
 }
 
 fn default_source() -> String {

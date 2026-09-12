@@ -36,6 +36,7 @@ fn translation(text: &str) -> vrcs_core::SubtitleTranslation {
 
 fn translation_in(target_language: &str, text: &str) -> vrcs_core::SubtitleTranslation {
     vrcs_core::SubtitleTranslation {
+        source_group: None,
         text: text.into(),
         source_language: Some("en".into()),
         target_language: target_language.into(),
@@ -612,4 +613,34 @@ fn native_translation_can_arrive_before_the_original() {
     };
     wrist.apply(event, now, &wrist_config);
     assert!(wrist.partials[0].translations.is_empty());
+}
+
+#[test]
+fn shared_translation_uses_group_context_only_on_the_last_sentence() {
+    let now = Instant::now();
+    let mut first = item_from_subtitle(subtitle(1, "Hello."), None, now);
+    let mut last = item_from_subtitle(subtitle(2, "How are you?"), None, now);
+    let mut translated = translation("你好，最近怎么样？");
+    translated.source_group = Some(vrcs_core::TranslationSourceGroup {
+        subtitle_ids: vec![1, 2],
+        text: "Hello. How are you?".into(),
+    });
+    assert!(!update_completed_translation(
+        &mut first,
+        translated.clone(),
+        true
+    ));
+    assert!(update_completed_translation(&mut last, translated, true));
+    assert_eq!(
+        display_text(&first, "bilingual", "preferred_only", "\n"),
+        "Hello."
+    );
+    assert_eq!(
+        display_text(&last, "bilingual", "preferred_only", "\n"),
+        "Hello. How are you?\n你好，最近怎么样？"
+    );
+    assert_eq!(
+        display_text(&last, "original", "preferred_only", "\n"),
+        "How are you?"
+    );
 }
