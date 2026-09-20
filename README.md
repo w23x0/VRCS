@@ -74,7 +74,7 @@ You can change the configuration at any time in the application. To run the setu
 
 - Send final microphone subtitles and translations to the VRChat OSC Chatbox
 - Quick Chatbox input, translation preview, formatting, and 144-character handling
-- Synchronize VRChat's `MuteSelf` state through OSCQuery and block automatic sending when muted or when the state is unknown
+- Synchronize VRChat's `MuteSelf` state through OSCQuery and block automatic sending when muted or when the state is unknown. The settings test message is always sent, so the connection can be verified before automatic sending is available
 - SteamVR VR Overlay with headset subtitles and a wrist-mounted conversation view
 - Configure the overlay to show original text, translations, or both; select system audio, microphone, and Chatbox sources; and adjust position, size, opacity, and display duration
 

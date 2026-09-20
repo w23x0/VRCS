@@ -75,7 +75,7 @@ enum OscEvent {
         target_language: String,
     },
     Test {
-        automatic_revision: u64,
+        config_revision: u64,
     },
     Manual {
         config_revision: u64,
@@ -90,7 +90,8 @@ impl OscEvent {
             Self::Subtitle { generation, .. }
             | Self::TranslationCompleted { generation, .. }
             | Self::TranslationFailed { generation, .. } => *generation == state.automatic_revision,
-            Self::Test { automatic_revision } => *automatic_revision == state.automatic_revision,
+            // 显式测试与手动发送同类：只在配置变化时失效，不因静音状态变化被丢弃。
+            Self::Test { config_revision } => *config_revision == state.config_revision,
             Self::Manual {
                 config_revision, ..
             } => *config_revision == state.config_revision,
@@ -133,6 +134,9 @@ impl SendGate {
 
 struct PendingMessage {
     message_id: String,
+    /// 用户显式发起的消息（手动编辑或个人触发的测试）：静音门下仍然发送。
+    /// 自动字幕消息则为 false，静音或静音状态未知时会被丢弃。
+    bypasses_mute_gate: bool,
     subtitle_id: Option<i64>,
     original: String,
     preferred_target: Option<String>,
@@ -272,9 +276,9 @@ impl OscChatboxDispatcher {
     }
 
     pub fn queue_test(&self) -> Result<(), &'static str> {
-        let automatic_revision = self.active_generation()?;
+        let config_revision = self.active_test_revision()?;
         self.sender
-            .try_send(OscEvent::Test { automatic_revision })
+            .try_send(OscEvent::Test { config_revision })
             .map_err(|_| {
                 self.record_drop();
                 "osc.queue_full"
@@ -358,6 +362,16 @@ impl OscChatboxDispatcher {
             return Err(code);
         }
         Ok(state.automatic_revision)
+    }
+
+    /// 显式测试是诊断动作，用于确认 OSC 通路是否可用：它不应受静音门限制
+    /// （VRChat 未运行或尚未开启 OSC 时静音状态本就未知，否则就成了"必须先连通才能测试连通"）。
+    fn active_test_revision(&self) -> Result<u64, &'static str> {
+        let state = self.config.borrow();
+        if !state.config.enabled {
+            return Err("osc.disabled");
+        }
+        Ok(state.config_revision)
     }
 
     fn active_manual_revision(&self) -> Result<u64, &'static str> {
@@ -494,7 +508,7 @@ fn reduce_config_change(state: &mut OscWorkerState, next: OscConfigState) -> Vec
     } else if next.automatic_revision != state.config.automatic_revision {
         state.current_sent = None;
         state.latest_subtitle_id = None;
-        discard_automatic_pending(&mut state.queue)
+        discard_blocked_pending(&mut state.queue)
     } else {
         Vec::new()
     };
@@ -519,6 +533,7 @@ fn reduce_received_event(
             &mut state.queue,
             PendingMessage {
                 message_id: generated_message_id.expect("test messages have generated IDs"),
+                bypasses_mute_gate: true,
                 subtitle_id: None,
                 original: "VRCS OSC test".into(),
                 preferred_target: None,
@@ -540,6 +555,7 @@ fn reduce_received_event(
             &mut state.queue,
             PendingMessage {
                 message_id: generated_message_id.expect("manual messages have generated IDs"),
+                bypasses_mute_gate: true,
                 subtitle_id: None,
                 original: String::new(),
                 preferred_target: None,
@@ -577,6 +593,7 @@ fn reduce_received_event(
                 &mut state.queue,
                 PendingMessage {
                     message_id,
+                    bypasses_mute_gate: false,
                     subtitle_id: Some(subtitle_id),
                     original: subtitle.text,
                     preferred_target,
@@ -712,6 +729,7 @@ fn reduce_translation_completed(
         &mut state.queue,
         PendingMessage {
             message_id: sent.message_id.clone(),
+            bypasses_mute_gate: false,
             subtitle_id: Some(subtitle_id),
             original: translation
                 .source_group
@@ -738,7 +756,7 @@ fn reduce_tick(state: &mut OscWorkerState, now: Instant) -> Vec<OscEffect> {
         return discard_all_pending(&mut state.queue);
     }
     let mut effects = if state.config.send_gate != SendGate::Open {
-        discard_automatic_pending(&mut state.queue)
+        discard_blocked_pending(&mut state.queue)
     } else {
         Vec::new()
     };
@@ -843,11 +861,13 @@ fn discard_all_pending(queue: &mut VecDeque<PendingMessage>) -> Vec<OscEffect> {
     queue.drain(..).map(OscEffect::DiscardPending).collect()
 }
 
-fn discard_automatic_pending(queue: &mut VecDeque<PendingMessage>) -> Vec<OscEffect> {
+/// 静音门关闭时清空缓冲：只保留用户显式发起过的消息（手动发送、测试），
+/// 自动字幕消息一律丢弃——它们等静音解除后再生成新的即可。
+fn discard_blocked_pending(queue: &mut VecDeque<PendingMessage>) -> Vec<OscEffect> {
     let mut retained = VecDeque::with_capacity(queue.len());
     let mut effects = Vec::new();
     while let Some(message) = queue.pop_front() {
-        if message.responder.is_some() {
+        if message.bypasses_mute_gate {
             retained.push_back(message);
         } else {
             effects.push(OscEffect::DiscardPending(message));
@@ -1251,6 +1271,7 @@ mod tests {
     fn pending_message(targets: &[&str]) -> PendingMessage {
         PendingMessage {
             message_id: "message-test".into(),
+            bypasses_mute_gate: false,
             subtitle_id: Some(1),
             original: "こんにちは".into(),
             preferred_target: targets.first().map(|target| (*target).into()),
@@ -1270,6 +1291,7 @@ mod tests {
         let (responder, _receiver) = oneshot::channel();
         PendingMessage {
             message_id: format!("manual-{text}"),
+            bypasses_mute_gate: true,
             subtitle_id: None,
             original: String::new(),
             preferred_target: None,
@@ -1324,6 +1346,45 @@ mod tests {
         reduce_translation_completed(&mut state, 1, translation, true, now);
         assert_eq!(state.queue[0].expected_targets, ["ja"]);
         assert_eq!(state.queue[0].desired_target.as_deref(), Some("ja"));
+    }
+
+    /// 显式测试不受静音门限制：VRChat 未运行（状态未知）或已静音时也要能发出去。
+    #[tokio::test]
+    async fn test_message_is_not_blocked_by_the_mute_gate() {
+        let dispatcher = OscChatboxDispatcher::new(OscConfig {
+            enabled: true,
+            mute_sync_enabled: true,
+            ..OscConfig::default()
+        });
+
+        dispatcher.update_mute_status(None);
+        assert_eq!(dispatcher.status().send_gate, "blocked_mute_unknown");
+        assert!(dispatcher.queue_test().is_ok());
+
+        dispatcher.update_mute_status(Some(true));
+        assert_eq!(dispatcher.status().send_gate, "blocked_vrchat_muted");
+        assert!(dispatcher.queue_test().is_ok());
+
+        // 关闭时仍然如实拒绝。
+        let disabled = OscChatboxDispatcher::new(OscConfig {
+            enabled: false,
+            ..OscConfig::default()
+        });
+        assert_eq!(disabled.queue_test(), Err("osc.disabled"));
+    }
+
+    /// 已排队的测试不因静音状态变化被丢弃（静音状态只影响 automatic_revision）。
+    #[test]
+    fn queued_test_survives_a_mute_state_change() {
+        let event = OscEvent::Test { config_revision: 0 };
+        let mut state = config_state();
+        assert!(event.is_current(&state));
+
+        state.automatic_revision = 7;
+        assert!(event.is_current(&state));
+
+        state.config_revision = 1;
+        assert!(!event.is_current(&state));
     }
 
     #[test]
@@ -1381,9 +1442,7 @@ mod tests {
         let effects = reduce_osc_event(
             &mut state,
             OscWorkerInput::Event {
-                event: OscEvent::Test {
-                    automatic_revision: 1,
-                },
+                event: OscEvent::Test { config_revision: 1 },
                 now: Instant::now(),
                 generated_message_id: None,
             },
@@ -1561,6 +1620,7 @@ mod tests {
         let request = |message_id: &str| OscSendRequest {
             message: PendingMessage {
                 message_id: message_id.into(),
+                bypasses_mute_gate: false,
                 subtitle_id: Some(1),
                 original: "こんにちは".into(),
                 preferred_target: Some("en".into()),
@@ -1943,11 +2003,13 @@ mod tests {
             translation_strategy: "preferred_only".into(),
         });
 
-        assert_eq!(dispatcher.queue_test(), Err("osc.blocked_mute_unknown"));
+        // 自动发送在静音状态未知时 fail-closed；显式测试是诊断动作，不受门限制
+        // （见 `test_message_is_not_blocked_by_the_mute_gate`）。
+        assert_eq!(dispatcher.status().send_gate, "blocked_mute_unknown");
         dispatcher.update_mute_status(Some(false));
+        assert_eq!(dispatcher.status().send_gate, "open");
         dispatcher.publish_subtitle(subtitle(1, "microphone", "stale"), false);
         dispatcher.update_mute_status(Some(true));
-        assert_eq!(dispatcher.queue_test(), Err("osc.blocked_vrchat_muted"));
         assert_eq!(dispatcher.status().send_gate, "blocked_vrchat_muted");
 
         let received = tokio::time::timeout(Duration::from_millis(250), async {
@@ -1956,5 +2018,37 @@ mod tests {
         })
         .await;
         assert!(received.is_err(), "muting must discard queued messages");
+    }
+
+    /// 静音状态未知时（VRChat 未运行，或 VRChat 里还没开 OSC），显式测试必须真的发出去：
+    /// 否则就成"必须先连通才能测试连通"。
+    #[tokio::test]
+    async fn test_message_is_delivered_while_the_mute_state_is_unknown() {
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let dispatcher = OscChatboxDispatcher::new(OscConfig {
+            enabled: true,
+            port: receiver.local_addr().unwrap().port(),
+            mute_sync_enabled: true,
+            mute_status_toast_enabled: false,
+            preserve_original_text: true,
+            translation_strategy: "preferred_only".into(),
+        });
+
+        dispatcher.update_mute_status(None);
+        assert_eq!(dispatcher.status().send_gate, "blocked_mute_unknown");
+        assert!(dispatcher.queue_test().is_ok());
+
+        let mut buffer = [0u8; 512];
+        let received = tokio::time::timeout(Duration::from_millis(1500), async {
+            receiver.recv_from(&mut buffer).await
+        })
+        .await
+        .expect("the OSC test message must be delivered while the mute state is unknown")
+        .expect("recv_from");
+        let payload = String::from_utf8_lossy(&buffer[..received.0]);
+        assert!(
+            payload.contains("/chatbox/input") && payload.contains("VRCS OSC test"),
+            "unexpected OSC payload: {payload:?}"
+        );
     }
 }
