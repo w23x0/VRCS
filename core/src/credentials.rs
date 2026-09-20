@@ -278,18 +278,193 @@ fn delete_stored(target_name: &str) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn read_stored(_target_name: &str) -> Result<Option<String>, String> {
-    Ok(None)
+use std::collections::BTreeMap;
+#[cfg(not(windows))]
+use std::io::Write;
+#[cfg(not(windows))]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(not(windows))]
+use std::path::{Path, PathBuf};
+
+/// 凭据文件在数据目录内的相对位置。
+#[cfg(not(windows))]
+const CREDENTIALS_FILE: &str = "vrcs/credentials.json";
+
+/// 解析数据目录：`$XDG_DATA_HOME` 只在绝对路径时生效（相对路径按 XDG 规范忽略），
+/// 否则回退到 `$HOME/.local/share`。
+#[cfg(not(windows))]
+fn data_home_from(
+    xdg_data_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = xdg_data_home.filter(|path| path.is_absolute()) {
+        return Ok(path);
+    }
+    let home = home.ok_or_else(|| {
+        "Cannot locate the credential store: neither XDG_DATA_HOME nor HOME is set".to_string()
+    })?;
+    Ok(home.join(".local/share"))
 }
 
 #[cfg(not(windows))]
-fn write_stored(_target_name: &str, _value: &str) -> Result<(), String> {
-    Err("This platform only supports API keys through environment variables".into())
+fn data_home() -> Result<PathBuf, String> {
+    data_home_from(
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+/// 凭据文件路径；参数化数据目录是为了让测试不必改动进程级环境变量。
+#[cfg(not(windows))]
+fn store_path_in(data_home: &Path) -> PathBuf {
+    data_home.join(CREDENTIALS_FILE)
 }
 
 #[cfg(not(windows))]
-fn delete_stored(_target_name: &str) -> Result<(), String> {
+fn store_path() -> Result<PathBuf, String> {
+    Ok(store_path_in(&data_home()?))
+}
+
+/// 读取整份凭据文件。文件不存在或内容为空视为空存储；内容损坏时如实报错，
+/// 而不是静默当成空存储、把别的密钥覆盖掉。权限过宽不报错，读取路径也不放宽任何权限。
+#[cfg(not(windows))]
+fn read_store(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => {
+            return Err(format!(
+                "Failed to read credential store {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    if text.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "Failed to parse credential store {}: {error}",
+            path.display()
+        )
+    })
+}
+
+/// 同目录临时文件 → 0600 → `rename` 原子替换：读者要么看到旧文件、要么看到新文件，
+/// 不会读到写了一半的 JSON。
+#[cfg(not(windows))]
+fn write_store(path: &Path, credentials: &BTreeMap<String, String>) -> Result<(), String> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| format!("Invalid credential store path: {}", path.display()))?;
+    std::fs::create_dir_all(directory).map_err(|error| {
+        format!(
+            "Failed to create credential directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    let json = serde_json::to_string(credentials)
+        .map_err(|error| format!("Failed to serialize credentials: {error}"))?;
+    let temporary = temporary_path(path);
+    if let Err(error) = write_private_file(&temporary, json.as_bytes()) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!(
+            "Failed to replace credential store {}: {error}",
+            path.display()
+        ));
+    }
     Ok(())
+}
+
+/// 用 `create_new` 新建（不会跟随已存在的符号链接），显式设置权限后再写入。
+#[cfg(not(windows))]
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "Failed to create temporary credential file {}: {error}",
+                path.display()
+            )
+        })?;
+    // 创建权限会被 umask 削减，这里显式收紧，保证 group/other 读不到。
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("Failed to restrict credential permissions: {error}"))?;
+    file.write_all(bytes).map_err(|error| {
+        format!(
+            "Failed to write credential store {}: {error}",
+            path.display()
+        )
+    })?;
+    file.sync_all().map_err(|error| {
+        format!(
+            "Failed to flush credential store {}: {error}",
+            path.display()
+        )
+    })
+}
+
+/// 临时文件必须落在凭据文件同目录（`rename` 不能跨文件系统），名字带上 pid/时间戳/序号避免并发撞名。
+#[cfg(not(windows))]
+fn temporary_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    path.with_file_name(format!(
+        ".credentials-{}-{nanos:x}-{sequence}.tmp",
+        std::process::id()
+    ))
+}
+
+#[cfg(not(windows))]
+fn read_value(path: &Path, target_name: &str) -> Result<Option<String>, String> {
+    let mut credentials = read_store(path)?;
+    Ok(credentials.remove(target_name))
+}
+
+#[cfg(not(windows))]
+fn write_value(path: &Path, target_name: &str, value: &str) -> Result<(), String> {
+    let mut credentials = read_store(path)?;
+    credentials.insert(target_name.to_string(), value.to_string());
+    write_store(path, &credentials)
+}
+
+/// 条目或文件不存在同样算删除成功，与 Windows 分支语义一致。
+#[cfg(not(windows))]
+fn delete_value(path: &Path, target_name: &str) -> Result<(), String> {
+    let mut credentials = read_store(path)?;
+    if credentials.remove(target_name).is_none() {
+        return Ok(());
+    }
+    write_store(path, &credentials)
+}
+
+#[cfg(not(windows))]
+fn read_stored(target_name: &str) -> Result<Option<String>, String> {
+    read_value(&store_path()?, target_name)
+}
+
+#[cfg(not(windows))]
+fn write_stored(target_name: &str, value: &str) -> Result<(), String> {
+    write_value(&store_path()?, target_name, value)
+}
+
+#[cfg(not(windows))]
+fn delete_stored(target_name: &str) -> Result<(), String> {
+    delete_value(&store_path()?, target_name)
 }
 
 #[cfg(test)]
@@ -329,5 +504,130 @@ mod tests {
         assert_ne!(VRCX_TARGET, target("profile"));
         assert!(write_external_api_token(" ").is_err());
         assert!(write_vrcx_token(" ").is_err());
+    }
+
+    #[cfg(not(windows))]
+    use std::path::{Path, PathBuf};
+
+    /// 隔离的凭据文件路径：数据目录刻意不存在，用来验证写入时会自行创建目录层级。
+    #[cfg(not(windows))]
+    fn temporary_store() -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = store_path_in(&directory.path().join("data"));
+        (directory, path)
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn credential_store_path_follows_the_xdg_layout() {
+        assert_eq!(
+            store_path_in(Path::new("/home/dev/.local/share")),
+            PathBuf::from("/home/dev/.local/share/vrcs/credentials.json")
+        );
+        assert_eq!(
+            store_path_in(Path::new("/data")),
+            PathBuf::from("/data/vrcs/credentials.json")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn data_home_prefers_xdg_and_falls_back_to_the_home_directory() {
+        let home = PathBuf::from("/home/dev");
+        assert_eq!(
+            data_home_from(Some(PathBuf::from("/data")), Some(home.clone())).unwrap(),
+            PathBuf::from("/data")
+        );
+        assert_eq!(
+            data_home_from(None, Some(home.clone())).unwrap(),
+            PathBuf::from("/home/dev/.local/share")
+        );
+        // XDG 规范：相对路径无效，退回 HOME。
+        assert_eq!(
+            data_home_from(Some(PathBuf::from("relative")), Some(home)).unwrap(),
+            PathBuf::from("/home/dev/.local/share")
+        );
+        assert!(data_home_from(None, None).is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn stored_credentials_round_trip_through_the_store_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_directory, path) = temporary_store();
+        assert_eq!(read_value(&path, "VRCS/ExternalAPI/token").unwrap(), None);
+
+        write_value(&path, "VRCS/ExternalAPI/token", "secret").unwrap();
+
+        assert_eq!(
+            read_value(&path, "VRCS/ExternalAPI/token")
+                .unwrap()
+                .as_deref(),
+            Some("secret")
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let stored: std::collections::HashMap<String, String> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            stored.get("VRCS/ExternalAPI/token").map(String::as_str),
+            Some("secret")
+        );
+        // 原子替换后不应留下临时文件。
+        let entries: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, ["credentials.json"]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn stored_credentials_are_independent_per_target() {
+        let (_directory, path) = temporary_store();
+        write_value(&path, "VRCS/ExternalAPI/token", "first").unwrap();
+        write_value(&path, "VRCS/VRCXIntegration/token", "second").unwrap();
+
+        write_value(&path, "VRCS/ExternalAPI/token", "updated").unwrap();
+
+        assert_eq!(
+            read_value(&path, "VRCS/ExternalAPI/token")
+                .unwrap()
+                .as_deref(),
+            Some("updated")
+        );
+        assert_eq!(
+            read_value(&path, "VRCS/VRCXIntegration/token")
+                .unwrap()
+                .as_deref(),
+            Some("second")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn deleting_stored_credentials_is_idempotent() {
+        let (_directory, path) = temporary_store();
+        // 文件还不存在时删除也要成功。
+        assert!(delete_value(&path, "VRCS/ExternalAPI/token").is_ok());
+
+        write_value(&path, "VRCS/ExternalAPI/token", "secret").unwrap();
+        assert!(delete_value(&path, "VRCS/ExternalAPI/token").is_ok());
+        assert_eq!(read_value(&path, "VRCS/ExternalAPI/token").unwrap(), None);
+        // 条目已不存在时再次删除仍是成功。
+        assert!(delete_value(&path, "VRCS/ExternalAPI/token").is_ok());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_corrupt_store_file_is_reported_instead_of_overwritten() {
+        let (_directory, path) = temporary_store();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{not json").unwrap();
+
+        assert!(read_value(&path, "VRCS/ExternalAPI/token").is_err());
+        assert!(write_value(&path, "VRCS/ExternalAPI/token", "secret").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
     }
 }

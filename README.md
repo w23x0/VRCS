@@ -124,6 +124,8 @@ npm run dev:core:cuda
 
 The standalone Core listens on `http://127.0.0.1:8766` by default, and its subtitle WebSocket is available at `ws://127.0.0.1:8766/ws`. The desktop application automatically generates and manages a local session token. If you run the Core separately and bind it to a non-loopback address, you must explicitly set a non-empty `VRCS_SESSION_TOKEN`.
 
+On Linux, build prerequisites, run and test commands, capture semantics, and the supported feature set are documented in [docs/Linux.md](docs/Linux.md).
+
 ## Testing
 
 ```powershell

@@ -50,12 +50,41 @@ pub(crate) struct FrontendErrorReport {
     component_stack: Option<String>,
 }
 
+#[cfg(target_os = "windows")]
 pub(crate) fn desktop_log_dir() -> PathBuf {
     std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir().join("VRCS"))
         .join(".vrcs")
         .join("logs")
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn desktop_log_dir() -> PathBuf {
+    home_dir().join("Library").join("Logs").join("VRCS")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn desktop_log_dir() -> PathBuf {
+    xdg_state_home()
+        .unwrap_or_else(|| home_dir().join(".local").join("state"))
+        .join("vrcs")
+        .join("logs")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn xdg_state_home() -> Option<PathBuf> {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
 }
 
 fn report_id() -> String {
@@ -99,8 +128,14 @@ fn clean_log_text(value: &str, max_chars: usize) -> String {
         .replace('\n', " | ")
         .replace('\t', " ");
     for (variable, replacement) in [
+        ("XDG_STATE_HOME", "%XDG_STATE_HOME%"),
+        ("XDG_DATA_HOME", "%XDG_DATA_HOME%"),
+        ("XDG_CONFIG_HOME", "%XDG_CONFIG_HOME%"),
+        ("XDG_CACHE_HOME", "%XDG_CACHE_HOME%"),
+        ("XDG_RUNTIME_DIR", "%XDG_RUNTIME_DIR%"),
         ("USERPROFILE", "%USERPROFILE%"),
         ("LOCALAPPDATA", "%LOCALAPPDATA%"),
+        ("HOME", "%HOME%"),
     ] {
         if let Ok(prefix) = std::env::var(variable) {
             if !prefix.is_empty() {

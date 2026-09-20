@@ -14,6 +14,16 @@ pub(crate) enum CaptureTarget {
     },
 }
 
+impl CaptureTarget {
+    /// 各平台统一的构造入口：`endpoint` 是后端自己的设备标识。
+    pub(crate) fn device(endpoint: Option<String>, direction: DeviceDirection) -> Self {
+        Self::Device {
+            wasapi_id: endpoint,
+            direction,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum DeviceDirection {
     Render,

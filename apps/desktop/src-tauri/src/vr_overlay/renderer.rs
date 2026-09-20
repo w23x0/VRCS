@@ -30,6 +30,7 @@ pub fn content_hash(
     hasher.finish()
 }
 
+#[cfg(windows)]
 pub fn render(
     layout: Layout,
     content: &PresentationContent,
@@ -37,8 +38,6 @@ pub fn render(
     background_opacity: f32,
 ) -> Result<Texture, String> {
     let (width, height) = dimensions(layout);
-
-    #[cfg(windows)]
     let pixels = match (layout, content) {
         (Layout::Headset, PresentationContent::Headset(text)) => {
             windows_renderer::render_mask(text, width, height, font_size_px, background_opacity)?
@@ -52,17 +51,25 @@ pub fn render(
         )?,
         _ => return Err("VR Overlay content does not match its layout".into()),
     };
-    #[cfg(not(windows))]
-    let pixels = {
-        let _ = (layout, content, font_size_px, background_opacity);
-        return Err("VR Overlay rendering is only supported on Windows".into());
-    };
 
     Ok(Texture {
         pixels,
         width,
         height,
     })
+}
+
+/// The overlay is rendered through GDI on Windows only; keep the same signature so
+/// callers stay platform-agnostic.
+#[cfg(not(windows))]
+pub fn render(
+    layout: Layout,
+    content: &PresentationContent,
+    font_size_px: u32,
+    background_opacity: f32,
+) -> Result<Texture, String> {
+    let _ = (layout, content, font_size_px, background_opacity);
+    Err("VR Overlay rendering is only supported on Windows".into())
 }
 
 fn dimensions(layout: Layout) -> (u32, u32) {
@@ -283,10 +290,16 @@ mod tests {
     fn content_hash_changes_with_text_or_style() {
         let hello = PresentationContent::Headset("hello".into());
         let world = PresentationContent::Headset("world".into());
-        let first = render(Layout::Headset, &hello, 48, 0.5).unwrap();
         let first_hash = content_hash(Layout::Headset, &hello, 48, 0.5);
         assert_ne!(first_hash, content_hash(Layout::Headset, &world, 48, 0.5));
         assert_ne!(first_hash, content_hash(Layout::Headset, &hello, 54, 0.5));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rendered_texture_has_rgba_pixel_per_dimension() {
+        let hello = PresentationContent::Headset("hello".into());
+        let first = render(Layout::Headset, &hello, 48, 0.5).unwrap();
         assert_eq!(
             first.pixels.len(),
             (first.width * first.height * 4) as usize

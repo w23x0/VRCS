@@ -1376,6 +1376,10 @@ mod tests {
         let db = Arc::new(Mutex::new(
             Database::open(&directory.path().join("test.db")).unwrap(),
         ));
+        // SQLite 需要在数据库文件旁边创建 journal/WAL。Windows 上打开中的文件无法删除，
+        // 目录会一直存在；Linux 上 `TempDir` 在函数返回时就删除，后续写入因而报
+        // "attempt to write a readonly database"。这里让临时目录活到进程结束。
+        let _ = directory.keep();
         let asr = Arc::new(Mutex::new(AsrService::with_engine(
             AsrConfig::default(),
             Box::new(FakeEngine),
