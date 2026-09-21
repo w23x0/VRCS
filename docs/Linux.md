@@ -17,7 +17,7 @@ Verified on Ubuntu 26.04 (x64) with PipeWire 1.6.2 and WirePlumber.
 - PipeWire and WirePlumber at runtime. PulseAudio is not required.
 
 ```bash
-sudo apt install build-essential pkg-config clang libclang-dev libssl-dev \
+sudo apt install build-essential cmake pkg-config clang libclang-dev libssl-dev \
   libpipewire-0.3-dev libspa-0.2-dev
 ```
 
@@ -89,6 +89,12 @@ Then open `http://localhost:1420`. The frontend talks to `http://127.0.0.1:8766`
 
 ## Build packages
 
+Bundling needs the Tauri toolchain on top of the prerequisites above:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+```
+
 ```bash
 npm --workspace apps/desktop run build:linux
 ```
@@ -116,7 +122,7 @@ The bundles are not signed and do not include updater artifacts, so they are for
 
 ### Per-process capture
 
-> **Status: experimental.** The mechanism is covered by integration tests (they verify the tapped tone's spectrum and that a second application's audio is excluded), but it has also been observed delivering unusable audio when the mode is started through the Core's API: the captured stream had the right level and rate yet its content was time-warped (no spectral peak in the captured tone where the test harness measures one), so the VAD rejected it and no subtitles were produced — silently. The same symptom reproduces with a build from before the current changes, so it is not a regression. Until it is understood, prefer **System output** (which captures everything the machine plays) if you see no subtitles while VRChat is speaking; the settings UI marks this mode as experimental for the same reason.
+> **Status: experimental.** The mechanism is covered by integration tests (they verify the tapped tone's spectrum and that a second application's audio is excluded), but it has also been observed delivering unusable audio when the mode is started through the Core's API: the captured stream had the right level and rate yet its content was time-warped (no spectral peak in the captured tone where the test harness measures one), so the VAD rejected it and no subtitles were produced — silently. The same symptom reproduces with a build from before the current changes, so it is not a regression. Until it is understood, prefer **System output** (which captures everything the machine plays) if you see no subtitles while VRChat is speaking; the settings UI marks this option as experimental. Tracked as issue 6 in [Known issues](KnownIssues.md), which also records what the tests have already ruled out.
 
 Selecting VRChat (or any single application) as the source resolves the process id, then finds the
 audio output streams that belong to that process and links their output ports to a private capture
@@ -148,8 +154,9 @@ cargo build --manifest-path core/Cargo.toml --features cuda
 
 Install the toolkit from [NVIDIA's CUDA repository](https://developer.nvidia.com/cuda-downloads); the distribution package can be
 too old for recent GPUs — Ubuntu 26.04 ships CUDA 12.4, which cannot target compute capability 12.0 (Blackwell). The preflight
-loads `libcuda.so.1` from the driver at runtime, so the resulting binary only needs `libcudart`/`libcublas` from the toolkit
-(CMake records their path as an rpath). Set `asr.local.device` to `cuda`, or leave it on `auto` to prefer CUDA when it is available.
+loads `libcuda.so.1` from the driver at runtime, so the resulting binary does not link the driver directly; it still links the
+toolkit's runtime libraries (`cublas`, `cublasLt`, `cudart`, and `culibos` where whisper.cpp asks for it). Set
+`asr.local.device` to `cuda`, or leave it on `auto` to prefer CUDA when it is available.
 
 ## Capability matrix
 
@@ -163,7 +170,7 @@ loads `libcuda.so.1` from the driver at runtime, so the resulting binary only ne
 | Per-process capture (VRChat only) | ⚠️ experimental: taps the application's own output streams; see the per-process capture section above for the observed limitation |
 | VR Overlay | ❌ Windows only (GDI rendering + OpenVR) |
 | CUDA acceleration for local Whisper | ✅ build with `--features cuda`; requires the NVIDIA driver and a CUDA toolkit recent enough for the GPU (CUDA 13.2 was used here) |
-| VRCX-0 integration | ❌ Windows program; on Linux it degrades to an error state |
+| VRCX-0 integration | ✅ platform-independent: a localhost WebSocket client with a token, no Windows-specific code. It needs a running VRCX-0 on the configured port and otherwise reports an error state, exactly as on Windows. Whether a Linux build of VRCX-0 serves the same API has not been verified here |
 | Dictionary import and lookup, learning items, Anki card export | ✅ platform-independent; AnkiConnect is reached over localhost HTTP |
 | Credential storage | File at `$XDG_DATA_HOME/vrcs/credentials.json` with mode `0600`, instead of the Windows Credential Manager |
 | Tauri desktop shell | ✅ builds and runs (unit tests pass) |
@@ -174,7 +181,7 @@ Credential storage details: the path is `$XDG_DATA_HOME/vrcs/credentials.json` (
 
 Data root: the desktop shell keeps its configuration, model files, subtitle database and credentials in `$XDG_DATA_HOME/vrcs` (`~/.local/share/vrcs`), and writes logs to `$XDG_STATE_HOME/vrcs/logs` (`~/.local/state/vrcs/logs`). An installation created while the shell still used the hidden `$XDG_DATA_HOME/.vrcs` directory is moved to the new location on first start; if that move fails the old directory stays in use (with a warning in the log), so an existing configuration and history are never silently abandoned.
 
-System tray: the tray icon is built when the desktop provides a StatusNotifier/AppIndicator host (GNOME needs an extension for this). On desktops without one, VRCS starts normally without a tray icon and closing the window really closes it instead of hiding into a tray that does not exist.
+System tray: the tray icon is visible only when the desktop provides a StatusNotifier/AppIndicator host (GNOME needs an extension for this). Because the appindicator library loads whether or not a panel implements the protocol, VRCS asks the session bus for a `StatusNotifierWatcher` at startup: without one it starts normally, keeps the tray icon invisible, disables **Minimize to tray**, and closing the window really closes it instead of hiding into a tray that does not exist. A bus that cannot be reached is treated as "host present", so a probe failure never removes a working tray.
 
 ## Testing
 
