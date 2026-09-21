@@ -32,6 +32,10 @@ tokio = { version = "1", features = ["sync"] }
 uuid = { version = "1", features = ["v4"] }
 vrcs-core = { path = "../../../core" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# 探测会话总线上有没有 StatusNotifier host；zbus 已由 tauri-plugin-single-instance 引入同一版本。
+zbus = "5"
+
 [target.'cfg(windows)'.dependencies]
 openvr = "0.9.0"
 openvr_sys = "2.1.4"

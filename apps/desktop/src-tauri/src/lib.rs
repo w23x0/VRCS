@@ -346,6 +346,44 @@ fn should_hide_on_close(preference: bool, tray_available: bool) -> bool {
     preference && tray_available
 }
 
+/// Whether a tray icon can actually be seen on this desktop.
+///
+/// On Linux `TrayIconBuilder::build` only proves that the appindicator library loaded: it never
+/// asks the session bus, so it succeeds on a desktop that has no StatusNotifier host, where the
+/// icon stays invisible. The close-to-tray path must not trust it, or the window would hide
+/// behind an icon that is not on screen. A bus that cannot be reached, or an unexpected reply,
+/// counts as available: a probe failure must not silently remove a tray that works.
+#[cfg(target_os = "linux")]
+fn tray_host_available() -> bool {
+    const WATCHERS: [&str; 2] = [
+        "org.kde.StatusNotifierWatcher",
+        "org.x.StatusNotifierWatcher",
+    ];
+
+    let Ok(connection) = zbus::blocking::Connection::session() else {
+        return true;
+    };
+    WATCHERS.iter().any(|watcher| {
+        connection
+            .call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "NameHasOwner",
+                &(*watcher,),
+            )
+            .ok()
+            .and_then(|reply| reply.body().deserialize::<bool>().ok())
+            .unwrap_or(true)
+    })
+}
+
+/// Windows and macOS always have a tray area; nothing to probe.
+#[cfg(not(target_os = "linux"))]
+fn tray_host_available() -> bool {
+    true
+}
+
 fn minimize_to_tray_enabled(app: &tauri::AppHandle) -> bool {
     app.store("preferences.json")
         .ok()
@@ -557,7 +595,16 @@ pub fn run() {
             let native_ui = app.state::<NativeUiState>();
             match tray.build(app) {
                 Ok(_) => {
-                    native_ui.tray_available.store(true, Ordering::Release);
+                    // 图标建好了不等于看得见：没有 host 时它不会出现在面板上，
+                    // 因此"最小化到托盘"的开关要以探测结果为准。
+                    let visible = tray_host_available();
+                    if !visible {
+                        tracing::warn!(
+                            "no StatusNotifier host on the session bus; the tray icon stays \
+                             invisible and minimize-to-tray is disabled"
+                        );
+                    }
+                    native_ui.tray_available.store(visible, Ordering::Release);
                     *native_ui
                         .show_item
                         .lock()
@@ -706,6 +753,59 @@ mod tests {
         assert!(!should_hide_on_close(true, false));
         assert!(!should_hide_on_close(false, true));
         assert!(!should_hide_on_close(false, false));
+    }
+
+    /// 探测必须如实反映总线：没有 watcher 就是"不可用"，而不是"库加载成功"。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn tray_host_probe_reports_no_watcher_on_a_private_bus() {
+        // 子进程跑在 `dbus-run-session` 新建的会话总线上，上面没有任何 StatusNotifier host。
+        if std::env::var_os("VRCS_TRAY_PROBE_CHILD").is_some() {
+            assert!(!super::tray_host_available());
+            return;
+        }
+        let status = std::process::Command::new("dbus-run-session")
+            .arg("--")
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::tray_host_probe_reports_no_watcher_on_a_private_bus",
+                "--nocapture",
+            ])
+            .env("VRCS_TRAY_PROBE_CHILD", "1")
+            .status();
+        match status {
+            Ok(status) => assert!(status.success(), "the private-bus probe failed: {status}"),
+            // 没装 dbus-run-session 时不假装测过。
+            Err(error) => eprintln!("skipping the private-bus probe test: {error}"),
+        }
+    }
+
+    /// 总线不可达时按"有托盘"处理：探测失败不该把能用的托盘关掉。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn tray_host_probe_treats_an_unreachable_bus_as_available() {
+        if std::env::var_os("VRCS_TRAY_PROBE_CHILD").is_some() {
+            assert!(super::tray_host_available());
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::tray_host_probe_treats_an_unreachable_bus_as_available",
+                "--nocapture",
+            ])
+            .env("VRCS_TRAY_PROBE_CHILD", "1")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                "unix:path=/nonexistent-vrcs-probe-bus",
+            )
+            .status()
+            .expect("re-exec the test binary");
+        assert!(
+            status.success(),
+            "the unreachable-bus probe failed: {status}"
+        );
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
