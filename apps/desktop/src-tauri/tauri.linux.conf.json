@@ -12,10 +12,15 @@
       "icons/icon.png"
     ],
     "shortDescription": "Real-time subtitles and language learning for VRChat",
-    "longDescription": "VRCS captures system output, VRChat process audio, and microphone input, shows live subtitles on the desktop or in SteamVR, and turns them into translations, dictionary lookups, and Anki cards.",
+    "longDescription": "VRCS captures system output, VRChat process audio, and microphone input, shows live subtitles on the desktop, and turns them into translations, dictionary lookups, and Anki cards.",
     "resources": {
       "../../../LICENSE": "LICENSE",
       "../../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libpipewire-0.3-0"]
+      }
     }
   }
 }

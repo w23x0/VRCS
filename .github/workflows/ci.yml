@@ -70,6 +70,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -105,3 +110,37 @@ jobs:
         run: |
           cargo test --manifest-path core/Cargo.toml --lib --locked
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --locked
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Linux bundles
+        run: npm --workspace apps/desktop run build:linux
+
+      - name: Verify Linux bundles
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(apps/desktop/src-tauri/target/release/bundle/deb/*.deb)
+          appimages=(apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage)
+          if [ "${#debs[@]}" -eq 0 ]; then
+            echo "::error::build:linux produced no .deb in bundle/deb"
+            exit 1
+          fi
+          if [ "${#appimages[@]}" -eq 0 ]; then
+            echo "::error::build:linux produced no .AppImage in bundle/appimage"
+            exit 1
+          fi
+          for deb in "${debs[@]}"; do
+            depends="$(dpkg-deb -f "$deb" Depends)"
+            echo "$deb"
+            echo "  Depends: $depends"
+            case "$depends" in
+              *libpipewire-0.3-0*) ;;
+              *)
+                echo "::error::$deb does not declare the PipeWire runtime dependency"
+                exit 1
+                ;;
+            esac
+          done
+          printf 'AppImage: %s\n' "${appimages[@]}"

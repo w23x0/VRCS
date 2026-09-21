@@ -279,8 +279,14 @@ pub(crate) fn open_log_directory(state: State<'_, DiagnosticState>) -> Result<()
 }
 
 fn recent_log_files(log_dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut files = std::fs::read_dir(log_dir)
-        .map_err(|error| error.to_string())?
+    let entries = match std::fs::read_dir(log_dir) {
+        Ok(entries) => entries,
+        // The directory only exists once this session wrote a log file, so a
+        // missing one means "no logs yet", not a failed export.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut files = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
@@ -403,5 +409,20 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn diagnostic_export_tolerates_a_log_directory_that_does_not_exist_yet() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "vrcs-diagnostic-missing-{}-{nonce}",
+            std::process::id()
+        ));
+        assert!(!directory.exists());
+
+        assert!(recent_log_files(&directory).unwrap().is_empty());
     }
 }
