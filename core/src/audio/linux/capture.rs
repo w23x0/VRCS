@@ -6,7 +6,7 @@
 //! 进程的路由，因此也就不需要在停止时恢复任何东西，语义与 Windows 的进程回环一致。
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender as SyncSender;
@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use pipewire as pw;
 use pw::loop_::Timeout;
 use pw::properties::{properties, PropertiesBox};
+use pw::spa::buffer::ChunkFlags;
 use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
 use pw::spa::param::format::{MediaSubtype, MediaType};
 use pw::spa::param::{format_utils, ParamType};
@@ -33,7 +34,8 @@ use crate::audio::CHUNK_FRAMES;
 const STREAM_NAME: &str = "vrcs-capture";
 /// 协商失败时最多重新提交几次固定格式（PipeWire 需要一次往返来插入转换器）。
 const MAX_FORMAT_ATTEMPTS: u32 = 3;
-/// 按进程采集时重新扫描目标进程新出现的输出流的间隔。
+/// 按进程采集时的图刷新间隔：每个刷新 tick 只读一次图快照，既在里面找我们自己的
+/// 输入端口，也用它算出要 tap 的目标流，因此快照频率与扫描频率是同一个节奏。
 const TAP_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 /// 按进程采集时上报的合成设备 id：不占用 0（"跟随系统默认"）也不与真实设备哈希冲突。
 const APPLICATION_DEVICE_ID: i64 = -1;
@@ -94,7 +96,10 @@ struct Prepared {
 /// 采集回调的共享可变状态；所有回调都在同一个主循环线程上，无需加锁。
 struct CaptureState {
     format: AudioInfoRaw,
+    /// 累积到 `CHUNK_FRAMES` 就发走的单声道样本；跨回调复用，不为每次回调新建。
     frames: Vec<f32>,
+    /// 出站分块的复用缓冲：通道积压退回时把容量留下，避免反复分配。
+    send_buffer: Vec<f32>,
     tx: mpsc::Sender<Vec<f32>>,
 }
 
@@ -224,6 +229,7 @@ fn capture(
     let state = CaptureState {
         format: AudioInfoRaw::new(),
         frames: Vec::with_capacity(CHUNK_FRAMES * 4),
+        send_buffer: Vec::with_capacity(CHUNK_FRAMES),
         tx: tx.clone(),
     };
 
@@ -299,7 +305,9 @@ fn capture(
                     }
                 }
                 StreamState::Error(message) => {
-                    *failure.borrow_mut() = Some(AudioError::with_code(
+                    // 启动阶段的目标节点可能刚好被重建、session manager 正在重排链路，
+                    // 这类 Error 通常是瞬时的，做成可重试让 start_with_retry 再试几次。
+                    *failure.borrow_mut() = Some(AudioError::retryable_with_code(
                         "audio.device_in_use",
                         format!("PipeWire capture stopped: {message}"),
                     ));
@@ -329,8 +337,8 @@ fn capture(
     // 目标流节点 id → 我们创建的链路代理；替换条目即断开旧链路。
     let mut taps: HashMap<u32, pw::link::Link> = HashMap::new();
     let mut own_input: Option<u32> = None;
-    // 初值取"刚刚过期"，让第一次接线立刻发生；之后按间隔扫描新出现的流。
-    let mut last_tap = Instant::now() - TAP_REFRESH_INTERVAL;
+    // 初值取"刚刚过期"，让第一次刷新立刻发生；之后每个 tick 只读一次图。
+    let mut last_refresh = Instant::now() - TAP_REFRESH_INTERVAL;
 
     while !stop.load(Ordering::Relaxed) {
         if let Some(error) = failure.borrow_mut().take() {
@@ -339,18 +347,25 @@ fn capture(
         }
 
         if let Some(pid) = tap_pid {
-            // 先等自己的输入端口出现，接上目标进程的输出流，再激活。
-            if own_input.is_none() {
-                if own_node.is_none() {
-                    own_node = valid_node_id(&stream);
-                }
-                own_input = own_node.and_then(|node| input_port_of(&session, node));
+            // 节点 id 是 client 本地缓存（server 绑定后才会被填上），这里读它不产生任何
+            // 往返；先等它有效，才有端口可查、可接。
+            if own_node.is_none() {
+                own_node = valid_node_id(&stream);
             }
-            if let (Some(node), Some(destination)) = (own_node, own_input) {
-                if last_tap.elapsed() >= TAP_REFRESH_INTERVAL {
-                    tap_target_streams(&session, pid, node, destination, &mut taps)?;
-                    last_tap = Instant::now();
+            // 每个刷新 tick 只做一次 `graph::snapshot`，同时供两件事使用：查我们自己的
+            // 输入端口、算要 tap 哪些目标流。以前是每次迭代（20 ms）都为了找输入端口
+            // 重读一遍图，启动阶段会白烧几百次往返 + 整图克隆 + 重新绑定所有 client。
+            // 自己的节点还不存在时（绑定尚未回来）没有任何东西可查可接，直接跳过这一拍。
+            if own_node.is_some() && last_refresh.elapsed() >= TAP_REFRESH_INTERVAL {
+                let snapshot = graph::snapshot(&session)?;
+                if own_input.is_none() {
+                    own_input = own_node.and_then(|node| input_port_of(&snapshot, node));
                 }
+                // 先把自己的输入端口接上目标进程的输出流，再激活（`set_active`）。
+                if let (Some(node), Some(destination)) = (own_node, own_input) {
+                    tap_target_streams(&session, &snapshot, pid, node, destination, &mut taps)?;
+                }
+                last_refresh = Instant::now();
             }
         }
 
@@ -393,8 +408,9 @@ fn valid_node_id(stream: &StreamRc) -> Option<u32> {
     (id != 0 && id != u32::MAX).then_some(id)
 }
 
-fn input_port_of(session: &Session, node_id: u32) -> Option<u32> {
-    let snapshot = graph::snapshot(session).ok()?;
+/// 从已读出的快照里取 `node_id` 的第一个输入端口。不自己读图：快照由调用方按刷新
+/// 节奏统一读取，一次 tick 只读一次。
+fn input_port_of(snapshot: &graph::GraphSnapshot, node_id: u32) -> Option<u32> {
     snapshot.ports_of(node_id, "in").first().map(|port| port.id)
 }
 
@@ -403,17 +419,24 @@ fn input_port_of(session: &Session, node_id: u32) -> Option<u32> {
 /// 每个输出流只取第一个端口（`port.name` 排序后即 FL）：目标流的立体声内容在
 /// 语音场景下左右一致，取单声道既避免了混音带来的电平差异，也复用了设备路径
 /// 已验证的单声道链路。新出现的流会在后续刷新里被接上，因此 VRChat 重启音频
-/// 或新建流时无需重开采集。
+/// 或新建流时无需重开采集。图快照由调用方传入，避免一次刷新读两遍图。
 fn tap_target_streams(
     session: &Session,
+    snapshot: &graph::GraphSnapshot,
     pid: u32,
     own_node: u32,
     destination_port: u32,
     taps: &mut HashMap<u32, pw::link::Link>,
 ) -> Result<(), AudioError> {
-    let snapshot = graph::snapshot(session)?;
+    let targets = snapshot.output_streams_of(pid);
+    // 目标进程已经关掉的流会从图里消失；及时丢掉它们的链路代理，否则这个 map 会随
+    // 采集会话只增不减，每个残留条目还一直占着 server 端的 link。链路掉了但流还在
+    // 的条目（下面 `linked` 检查）保留，等下一次刷新重接。
+    let live: HashSet<u32> = targets.iter().map(|node| node.id).collect();
+    taps.retain(|node_id, _| live.contains(node_id));
+
     let mut created = false;
-    for node in snapshot.output_streams_of(pid) {
+    for node in targets {
         // 接好了且链路仍在就跳过；链路掉了（源节点重建、session manager 重排）则重接。
         let linked = snapshot
             .links()
@@ -453,38 +476,155 @@ fn tap_target_streams(
     Ok(())
 }
 
+/// 一块 chunk 是否可用于解码：长度非 0，且没有被标记为损坏。
+///
+/// `size == 0` 表示这次回调没有有效数据；`ChunkFlags::CORRUPTED` 表示映射里的内容
+/// 不是本次采样的音频（可能是上一次留下的残留样本或未初始化的内存）。把这种块
+/// 推给 ASR，等于把陈旧/垃圾样本当成新声音，因此整块跳过、不推进任何数据。
+fn usable_chunk(size: usize, flags: ChunkFlags) -> bool {
+    size > 0 && !flags.contains(ChunkFlags::CORRUPTED)
+}
+
+/// 把 `raw` 里 `[offset, offset + size)` 的整帧混成单声道 f32 追加到 `frames`。
+///
+/// `offset`/`size` 来自 chunk 元信息：有效数据不保证从映射起点开始，映射也可能比
+/// chunk 声称的短，因此先把区间按 `raw.len()` 夹紧；末尾不足一帧的字节直接丢弃，
+/// 绝不把半个样本当成一帧解码。多声道按声道平均值下混（纯平均，不做加权）。
+fn append_mono(frames: &mut Vec<f32>, raw: &[u8], offset: usize, size: usize, channels: usize) {
+    let channels = channels.max(1);
+    let end = offset.saturating_add(size).min(raw.len());
+    if offset >= end {
+        return;
+    }
+    for frame in raw[offset..end].chunks_exact(channels * 4) {
+        let mut sum = 0.0_f32;
+        for sample in frame.as_chunks::<4>().0 {
+            sum += f32::from_le_bytes(*sample);
+        }
+        frames.push(sum / channels as f32);
+    }
+}
+
+/// 把 `frames` 里攒满的整块发给管线。
+///
+/// 出站 `Vec` 的所有权必须转移给通道，因此每发走一块必然有一次分配（通道协议决定
+/// 的，无法复用同一个缓冲）；这里省掉的是转换侧的临时缓冲，并且把通道积压退回来
+/// 的分块留在 `send_buffer` 里复用，避免为已经要丢弃的块反复分配。
+fn drain_chunks(state: &mut CaptureState) {
+    while state.frames.len() >= CHUNK_FRAMES {
+        state.send_buffer.clear();
+        state
+            .send_buffer
+            .extend_from_slice(&state.frames[..CHUNK_FRAMES]);
+        // 剩下的样本挪到开头继续攒；帧数很少，这次搬移代价可以忽略。
+        state.frames.copy_within(CHUNK_FRAMES.., 0);
+        state.frames.truncate(state.frames.len() - CHUNK_FRAMES);
+
+        match state.tx.try_send(std::mem::take(&mut state.send_buffer)) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(chunk)) => {
+                tracing::debug!("dropping a captured audio chunk because the pipeline is behind");
+                state.send_buffer = chunk;
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!("dropping a captured audio chunk because the pipeline is gone");
+            }
+        }
+    }
+}
+
 /// 把一块 PipeWire buffer 转成单声道 f32，并切成 `CHUNK_FRAMES` 的分块。
+///
+/// 全程不分配临时缓冲：样本直接累加到 `state.frames`（跨回调复用），只有真正要发给
+/// 管线的那一刻才复制进 `state.send_buffer`。
 fn capture_frames(stream: &Stream, state: &mut CaptureState) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
     };
     let channels = state.format.channels().max(1) as usize;
-    let mono = {
+    {
         let datas = buffer.datas_mut();
         let Some(data) = datas.first_mut() else {
             return;
         };
-        let expected = data.chunk().size() as usize;
+        let size = data.chunk().size() as usize;
+        let flags = data.chunk().flags();
+        if !usable_chunk(size, flags) {
+            return;
+        }
+        let offset = data.chunk().offset() as usize;
         let Some(raw) = data.data() else {
             return;
         };
-        let usable = expected.min(raw.len());
-        let mut mono = Vec::with_capacity(usable / (channels * 4).max(1) + 1);
-        for frame in raw[..usable].chunks_exact(channels * 4) {
-            let mut sum = 0.0_f32;
-            for sample in frame.as_chunks::<4>().0 {
-                sum += f32::from_le_bytes(*sample);
-            }
-            mono.push(sum / channels as f32);
-        }
-        mono
-    };
+        append_mono(&mut state.frames, raw, offset, size, channels);
+    }
+    drain_chunks(state);
+}
 
-    state.frames.extend_from_slice(&mono);
-    while state.frames.len() >= CHUNK_FRAMES {
-        let chunk: Vec<f32> = state.frames.drain(..CHUNK_FRAMES).collect();
-        if state.tx.try_send(chunk).is_err() {
-            tracing::debug!("dropping a captured audio chunk because the pipeline is behind");
-        }
+#[cfg(test)]
+mod tests {
+    use super::{append_mono, usable_chunk, ChunkFlags};
+
+    /// 一帧多声道 F32LE 样本的字节序列。
+    fn frame(samples: &[f32]) -> Vec<u8> {
+        samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn append_mono_starts_at_the_chunk_offset() {
+        // 映射前面还有一整帧的垃圾（例如转换器留下的填充），有效数据从第 4 字节开始。
+        let mut raw = frame(&[9.0]);
+        raw.extend_from_slice(&frame(&[0.25]));
+        let mut mono = Vec::new();
+        append_mono(&mut mono, &raw, 4, 4, 1);
+        assert_eq!(mono, vec![0.25]);
+    }
+
+    #[test]
+    fn append_mono_clamps_the_size_to_the_mapping() {
+        let raw = frame(&[1.0, 2.0]);
+        let mut mono = Vec::new();
+        // chunk 声称的 size 远大于映射：只能按映射长度解码。
+        append_mono(&mut mono, &raw, 0, 4096, 1);
+        assert_eq!(mono, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn append_mono_drops_a_partial_trailing_frame() {
+        let mut raw = frame(&[1.0, 2.0]);
+        raw.extend_from_slice(&[0xAB, 0xCD]);
+        let mut mono = Vec::new();
+        append_mono(&mut mono, &raw, 0, raw.len(), 1);
+        assert_eq!(mono, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn append_mono_downmixes_by_averaging_the_channels() {
+        // 两帧立体声：下混取声道平均（第一帧 2.0，第二帧 0.0）。
+        let raw = frame(&[1.0, 3.0, -2.0, 2.0]);
+        let mut mono = Vec::new();
+        append_mono(&mut mono, &raw, 0, raw.len(), 2);
+        assert_eq!(mono, vec![2.0, 0.0]);
+    }
+
+    #[test]
+    fn append_mono_yields_nothing_for_an_empty_or_out_of_range_chunk() {
+        let raw = frame(&[1.0]);
+        let mut mono = Vec::new();
+        append_mono(&mut mono, &raw, 0, 0, 1);
+        append_mono(&mut mono, &raw, 64, 4, 1);
+        // 声道数 0 按 1 处理：仍解出这一帧，而不是除以 0。
+        append_mono(&mut mono, &raw, 0, 4, 0);
+        assert_eq!(mono, vec![1.0]);
+    }
+
+    #[test]
+    fn corrupt_and_empty_chunks_are_unusable() {
+        assert!(!usable_chunk(0, ChunkFlags::empty()));
+        assert!(!usable_chunk(1024, ChunkFlags::CORRUPTED));
+        assert!(usable_chunk(1024, ChunkFlags::empty()));
     }
 }

@@ -3,8 +3,9 @@
 //! 与 `audio/wasapi/` 的语义保持一致：
 //! - `DeviceDirection::Render`（系统音频）→ 录制某个 sink 的 monitor 端口；
 //! - `DeviceDirection::Capture`（麦克风）→ 录制某个 source 节点；
-//! - `CaptureTarget::Process`（按进程隔离采集）→ 尚未实现，返回
-//!   `audio.process_loopback_unavailable`。
+//! - `CaptureTarget::Process`（按进程隔离采集）→ 不自动接线，而是把目标进程音频
+//!   输出流的端口手动接到本流的输入端口（tap），只录该进程的声音；它不改变目标
+//!   进程的路由，因此停止时也不需要恢复任何东西。
 
 mod capture;
 mod devices;
