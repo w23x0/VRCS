@@ -47,7 +47,7 @@ You can change the configuration at any time in the application. To run the setu
 
 ### Real-time subtitles and audio
 
-- Windows WASAPI system loopback, dedicated VRChat process loopback, and microphone capture
+- System loopback (Windows WASAPI, Linux PipeWire), dedicated VRChat process loopback, and microphone capture
 - Dual-stream transcription for system audio and microphone input, with independent audio source and device controls
 - Silero ONNX VAD with automatic fallback to energy-based detection when the model is unavailable
 - Optional Smart Turn semantic endpointing for locally controlled speech segments
@@ -98,7 +98,7 @@ When using local Whisper, speech is not sent to the cloud. When using cloud reco
 
 Development requirements:
 
-- Windows 10 or 11
+- Windows 10 or 11, or Linux (see [docs/Linux.md](docs/Linux.md))
 - Node.js 24+
 - Rust stable
 - Visual Studio Build Tools with the **Desktop development with C++** workload

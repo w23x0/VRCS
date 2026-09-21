@@ -23,6 +23,9 @@ body { zoom: var(--interface-scale, 1); }
   align-items: stretch;
   background: var(--canvas);
   user-select: none;
+  /* The three window buttons plus the actions row padding; the north resize
+     strip stops short of it so the buttons keep their whole hit area. */
+  --window-actions-width: 120px;
 }
 .window-drag-region { flex: 1; }
 .window-actions { display: flex; padding: 4px 6px 4px 0; }
@@ -42,6 +45,21 @@ body { zoom: var(--interface-scale, 1); }
 .window-actions button:hover { color: var(--text); background: var(--surface-subtle); }
 .window-actions .window-close:hover { color: var(--error); background: var(--error-soft); }
 .window-actions button:active { background: var(--primary-soft); }
+
+/* Undecorated Linux windows have no window-manager border to grab, so the shell
+   draws its own thin resize strips along the window edges. The layer spans the
+   window but only the strips themselves take pointer events, so clicks on the
+   UI underneath keep working. */
+.window-resize-handles { position: fixed; z-index: 200; inset: 0; pointer-events: none; }
+.window-resize-handle { position: absolute; pointer-events: auto; }
+.window-resize-handle-north { top: 0; right: var(--window-actions-width); left: 0; height: 5px; cursor: ns-resize; }
+.window-resize-handle-south { right: 0; bottom: 0; left: 0; height: 5px; cursor: ns-resize; }
+.window-resize-handle-west { top: 0; bottom: 0; left: 0; width: 5px; cursor: ew-resize; }
+.window-resize-handle-east { top: 0; right: 0; bottom: 0; width: 5px; cursor: ew-resize; }
+.window-resize-handle-north-west { top: 0; left: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+.window-resize-handle-north-east { top: 0; right: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+.window-resize-handle-south-west { bottom: 0; left: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+.window-resize-handle-south-east { right: 0; bottom: 0; width: 12px; height: 12px; cursor: nwse-resize; }
 
 .app-body {
   position: relative;

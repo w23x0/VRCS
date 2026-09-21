@@ -100,7 +100,7 @@ apps/desktop/src-tauri/target/release/bundle/deb/VRCS_<version>_amd64.deb
 apps/desktop/src-tauri/target/release/bundle/appimage/VRCS_<version>_amd64.AppImage
 ```
 
-Install the Debian package with `sudo dpkg -i <package>.deb`; it depends on `libwebkit2gtk-4.1-0`, `libgtk-3-0`, and `libayatana-appindicator3-1`. The AppImage is self-contained, so make it executable and run it directly. Add `-- --bundles deb` to build only one target.
+Install the Debian package with `sudo dpkg -i <package>.deb`; it depends on `libwebkit2gtk-4.1-0`, `libgtk-3-0`, `libayatana-appindicator3-1`, and `libpipewire-0.3-0` (the desktop binary links the Core in-process, so the PipeWire client library is a hard runtime dependency). The AppImage is self-contained, so make it executable and run it directly. Add `-- --bundles deb` to build only one target.
 
 The bundles are not signed and do not include updater artifacts, so they are for local builds; the release pipeline with its signing keys lives in `scripts/build-release.ps1` (Windows).
 
@@ -110,11 +110,13 @@ The bundles are not signed and do not include updater artifacts, so they are for
 - **Microphone** records the selected source node.
 - Device ids are a stable hash of the PipeWire `node.name`, so they survive restarts. PipeWire's global node ids change on every reconnect and are never used as device identity; a stored id is resolved back to its `node.name` before capture.
 - The requested stream format is fixed: **16 kHz, mono, f32** (`F32LE`). PipeWire inserts converters and resamplers into the graph, so the device's native format does not matter. If the server does not accept the requested format, the stream renegotiates; if that fails the capture reports `audio.unsupported_format`.
-- Sample rate and channel count come from the PipeWire graph settings (`default.clock.rate`), and the default device is determined from the `default` metadata.
-- There is no per-process capture on Linux: requesting it returns the error code `audio.process_loopback_unavailable` instead of silently falling back to whole-system audio.
+- Sample rate comes from the PipeWire graph rate (`clock.rate` in the `settings` metadata, with `default.clock.rate` accepted as a legacy fallback); the channel count of a device is its node's `audio.channels`, and the default device is determined from the `default` metadata.
+- Per-process capture taps the target application's audio output streams; see below. If the tap cannot be created the capture reports `audio.process_loopback_unavailable` instead of silently falling back to whole-system audio.
 - Device endpoints are PipeWire `node.name` values, not WASAPI endpoint ids, so an audio configuration copied from Windows does not carry over.
 
 ### Per-process capture
+
+> **Status: experimental.** The mechanism is covered by integration tests (they verify the tapped tone's spectrum and that a second application's audio is excluded), but it has also been observed delivering unusable audio when the mode is started through the Core's API: the captured stream had the right level and rate yet its content was time-warped (no spectral peak in the captured tone where the test harness measures one), so the VAD rejected it and no subtitles were produced — silently. The same symptom reproduces with a build from before the current changes, so it is not a regression. Until it is understood, prefer **System output** (which captures everything the machine plays) if you see no subtitles while VRChat is speaking; the settings UI marks this mode as experimental for the same reason.
 
 Selecting VRChat (or any single application) as the source resolves the process id, then finds the
 audio output streams that belong to that process and links their output ports to a private capture
@@ -158,16 +160,21 @@ loads `libcuda.so.1` from the driver at runtime, so the resulting binary only ne
 | Local Whisper (CPU) | ✅ (subtitles verified end to end) |
 | Cloud ASR | ✅ (platform-independent code path) |
 | SQLite history + FTS | ✅ |
-| Per-process capture (VRChat only) | ✅ taps the application's own output streams |
+| Per-process capture (VRChat only) | ⚠️ experimental: taps the application's own output streams; see the per-process capture section above for the observed limitation |
 | VR Overlay | ❌ Windows only (GDI rendering + OpenVR) |
 | CUDA acceleration for local Whisper | ✅ build with `--features cuda`; requires the NVIDIA driver and a CUDA toolkit recent enough for the GPU (CUDA 13.2 was used here) |
 | VRCX-0 integration | ❌ Windows program; on Linux it degrades to an error state |
 | Dictionary import and lookup, learning items, Anki card export | ✅ platform-independent; AnkiConnect is reached over localhost HTTP |
 | Credential storage | File at `$XDG_DATA_HOME/vrcs/credentials.json` with mode `0600`, instead of the Windows Credential Manager |
-| Tauri desktop shell | \u2705 builds and runs (unit tests pass) |
-| Installers (deb/AppImage) | \u2705 `npm --workspace apps/desktop run build:linux` |
+| Tauri desktop shell | ✅ builds and runs (unit tests pass) |
+| Installers (deb/AppImage) | ✅ `npm --workspace apps/desktop run build:linux` |
+| In-app updater | ❌ not compiled off Windows; the build reports updates as unavailable |
 
 Credential storage details: the path is `$XDG_DATA_HOME/vrcs/credentials.json` (`XDG_DATA_HOME` defaults to `~/.local/share`), the file is written with mode `0600` using a temporary file plus atomic rename, and environment variable overrides keep their existing precedence over stored values.
+
+Data root: the desktop shell keeps its configuration, model files, subtitle database and credentials in `$XDG_DATA_HOME/vrcs` (`~/.local/share/vrcs`), and writes logs to `$XDG_STATE_HOME/vrcs/logs` (`~/.local/state/vrcs/logs`). An installation created while the shell still used the hidden `$XDG_DATA_HOME/.vrcs` directory is moved to the new location on first start; if that move fails the old directory stays in use (with a warning in the log), so an existing configuration and history are never silently abandoned.
+
+System tray: the tray icon is built when the desktop provides a StatusNotifier/AppIndicator host (GNOME needs an extension for this). On desktops without one, VRCS starts normally without a tray icon and closing the window really closes it instead of hiding into a tray that does not exist.
 
 ## Testing
 
@@ -179,3 +186,31 @@ npm --workspace apps/desktop test
 
 - The PipeWire capture integration test in `core/src/audio/linux/mod.rs` needs a live PipeWire session and skips itself when it cannot connect.
 - That test also plays a test tone through `pw-play` (from `pipewire-bin` on Debian/Ubuntu) and skips when the command is missing. It creates its own null sink with a low session priority, so it does not take over the default device.
+
+### End-to-end check of the capture path
+
+The integration tests drive `AudioCapture` directly. To exercise the whole chain (capture → VAD → local Whisper → subtitle database) through the Core's HTTP API, use a virtual sink and a speech file:
+
+```bash
+# 1. A sink whose monitor always carries audio, and its virtual source.
+pw-loopback --capture-props 'media.class=Audio/Sink node.name=vrcs-e2e-sink' \
+            --playback-props 'media.class=Audio/Source node.name=vrcs-e2e-source' &
+
+# 2. Point audio.output at that sink. mode = "system", device_id = the same
+#    FNV-1a 64-bit hash of the node name that the backend uses for device ids:
+python3 -c 'n="vrcs-e2e-sink";h=0xcbf29ce484222325
+for b in n.encode(): h=((h^b)*0x100000001b3)&0xFFFFFFFFFFFFFFFF
+print(h & 0x7fffffffffffffff)'
+
+# 3. Run the Core with local Whisper and the Silero model, start capture, play
+#    speech into the sink, then read the transcripts back.
+VRCS_CONFIG=/tmp/vrcs-e2e/config.json VRCS_PORT=8766 VRCS_SESSION_TOKEN=devtoken \
+VRCS_SILERO_MODEL=~/.local/share/vrcs/models/silero_vad.onnx \
+  cargo run --manifest-path core/Cargo.toml &
+curl -s -X POST -H 'Authorization: Bearer devtoken' -H 'Content-Type: application/json' \
+     -d '{}' http://127.0.0.1:8766/api/capture/start
+pw-play --target vrcs-e2e-sink speech.wav
+curl -s -H 'Authorization: Bearer devtoken' 'http://127.0.0.1:8766/api/subtitles?limit=5'
+```
+
+A short speech sample (for example `jfk.wav` from the whisper.cpp repository) is enough: with `asr.backend = "local_whisper"` and `asr.local.model = "tiny"` the transcript appears within a few seconds of playback. This is also the way to check the microphone path (`audio.microphone.mode = "device"` pointed at a virtual source).
