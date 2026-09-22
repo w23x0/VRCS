@@ -26,8 +26,9 @@ const RESIZE_HANDLES: ReadonlyArray<{ direction: ResizeDirection; placement: str
 /**
  * Undecorated windows on Linux/GTK have no window-manager border to grab, so the
  * frameless shell draws its own thin resize strips along the window edges.
- * Windows and macOS keep their native decorations and render nothing here, and
- * the browser preview has no window to resize.
+ * The strips are Linux-only: Windows still resizes an undecorated window through
+ * the edge hit-testing in its window procedure (`WM_NCHITTEST`), and the browser
+ * preview has no window to resize.
  */
 export function WindowResizeHandles({ maximized }: { maximized: boolean }) {
   const [platform, setPlatform] = useState<string | null>(null);
