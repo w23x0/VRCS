@@ -9,7 +9,7 @@
 - **Linux 端可以构建、测试并运行。** 两个 Rust crate 的 fmt、clippy（`-D warnings`）和测试全部通过，前端测试、i18n 校验、生产构建通过，`.deb` 和 `.AppImage` 都能打出来。在 Xvfb 下 AppImage 能启动，进程内 Core 能起来，能通过 PipeWire 枚举设备，没有托盘时关闭窗口会真正退出。
 - **本轮新发现并修复了 3 个缺陷，另外修了 1 个遗留问题**，每个一个 commit（见第 3 节）。其中两个会直接影响用户：
   - 用户明确选择的采集设备，会在系统默认设备变化时被 WirePlumber 悄悄换成别的设备；
-  - 之前的移植把 7 条音频错误提示改成了平台中性的措辞，Windows 用户因此看不到原来的 Windows 专属处理建议（违反了“不改变 Windows 行为”）。
+  - 之前的移植把 15 条文案（7 条音频错误提示和 8 条其他文案）改成了平台中性的措辞，Windows 用户因此看不到原来的 Windows 专属处理建议（违反了“不改变 Windows 行为”）。现在上游已有的每个文案键，在 4 种语言里都与上游逐字一致，Linux 另外显示 `_linux` 变体（第二轮按 D2 完成）。
 - **遗留问题 #6（按进程采集“时间扭曲”）无法复现。** 我用和 Core 相同的方式驱动采集（按进程名查找、`spawn_blocking` 启动、同时轮询设备列表），分别用原生客户端和 PulseAudio 协议客户端、44.1 kHz 和 48 kHz 测试，音频的频率和电平都正确，合成语音也能通过 Silero VAD。另外找到一个测试工具本身的陷阱，可以原样复现当时报告的症状（见 4.2）。要去掉“实验性”标签，还需要在真实的 VRChat/Proton 上跑一次，这一步我这里做不了。
 - 上游 `main` 的 **`Cargo.lock` 和版本号不同步**，所以 `--locked` 会失败，上游 CI 大概率已经是红的。这是给上游的第一条建议（见第 5 节）。
 
@@ -41,7 +41,7 @@
 | `cargo test --lib`（core，连接真实 PipeWire 会话，全部集成测试都实际执行，没有跳过） | ✅ 479 passed，连续 3 次全绿。修复前每次都有 1 个失败，见 3.1 |
 | `cargo test --lib`（src-tauri） | ✅ 40 passed，包括私有 dbus 上的托盘探测子进程测试 |
 | `npm run check:i18n` | ✅ |
-| `npm --workspace apps/desktop test` | ✅ 184 passed（原 182 个加上新增 2 个） |
+| `npm --workspace apps/desktop test` | ✅ 186 passed（原 182 个加上新增 4 个） |
 | `tsc --noEmit`、`npm run build:frontend` | ✅ |
 | `npm --workspace apps/desktop run build:linux` | ✅ 产出 `.deb` 和 `.AppImage`；`.deb` 的 Depends 包含 `libpipewire-0.3-0` |
 | AppImage 在 Xvfb 中运行 | ✅ 引导页、主界面、设置页都能正常渲染；Core 在进程内启动；数据写到 `~/.local/share/vrcs`，日志写到 `~/.local/state/vrcs/logs`；无 StatusNotifier host 时给出警告，“最小化到托盘”置灰并注明原因；点 × 后进程退出 |
@@ -57,7 +57,7 @@
 
 临时探针（用来对比 Core 调用方式、测 VAD、测默认设备切换的一次性测试）已经从工作区删除，没有提交。
 
-## 3. 已修复（`ced5671..b90a4b5`，每项一个 commit，都已推送）
+## 3. 已修复（`ced5671..9b6b2a5`，每项一个 commit，都已推送）
 
 ### 3.1 `4762743` 测试：让 PipeWire 测试的播放器固定在自己的 sink 上
 
@@ -87,7 +87,14 @@
 - **修复**：`errors.audio.*` 的基础键逐字恢复为上游 `7c407ad` 的文本；移植时写的 Linux 文案保留为 `<key>_linux`，覆盖 PipeWire 后端可能报出的 6 个错误码（`com_initialization_failed` 只有 WASAPI 会报，所以没有 Linux 变体）。`localizedError` 在 webview 的 UA 是 Linux（不含 Android）时传 i18next `context: "linux"`；其他平台，或者某个键没有 Linux 变体时，i18next 会回退到基础键，所以不会出现提示消失的情况。
 - **验证**：新增 2 个测试，分别覆盖 UA 判断和真实 i18next 实例上的变体选择与回退；`check:i18n`、184 个前端测试、tsc、vite build 全部通过。
 
-### 3.5 `4b05062` 文档
+### 3.5 `9b6b2a5` 其余平台文案也改为按平台区分（D2，第二轮）
+
+- **范围**：把 fork 相对上游的 4 个语言文件逐键比对，找出上游已有、但值被改动过的键：除了 3.4 的 7 条以外还有 8 条，即 `updates.status.unavailable`、`settings.apiManagement.securityNotice`、`sourceCredentialManager`、`settings.audio.systemOutputDescription`、`defaultMicrophoneDescription`、`onboarding.recognition.addApiDescription`、`errors.desktop.autostart_not_applied`、`errors.audio.unsupported_platform`。
+- **修复**：基础键逐字恢复为上游文本，fork 的文案保留为 `<key>_linux`。`unsupported_platform` 例外，因为 Linux 版不会报这个错，所以只恢复基础值。直接调用 `t()` 的 6 处（软件更新状态、API 管理说明、引导页的识别步骤和音频步骤）传入同一个平台 context；开机启动的错误本来就经过 `localizedError`。`sourceCredentialManager` 在上游代码里也没有被引用，只恢复了它的值。
+- **结果**：再次逐键比对，4 种语言里上游已有的键**与上游的差异为 0 条**；fork 只新增了键（`_linux` 变体、托盘不可用提示、VRChat 实验性标签和提示）。
+- **验证**：新增 2 个测试，一个覆盖新变体在两个平台下的取值，另一个检查每个 `_linux` 键在每种语言里都有基础键可以回退。`check:i18n`、186 个前端测试、tsc、vite build 全部通过。另外在运行中的前端上验证：Vite 加独立 Core，用 Chromium 分别以 WebView2 UA 和 WebKitGTK UA 打开，每次都用全新配置；引导页和设置页上的 5 条文案各自显示对应平台的版本，没有出现另一平台的文案。为了进入引导页的音频步骤，测试中在浏览器里拦截了 `/api/asr/models`，让它报告模型已下载；这只作用于测试页面，没有改动 Core 和仓库代码。
+
+### 3.6 `4b05062` 文档
 
 `docs/Linux.md` 和 `docs/KnownIssues.md` 已按本轮结果更新：补充验证组合、写明“显式设备不跟随 / System default 跟随”的语义、重写 #6 的现状、标记 #5 已修复、新增 #8–#10。
 
@@ -109,7 +116,6 @@
 
 ### 4.1 其他观察（没有列入 KnownIssues）
 
-- **Windows 上还可见的措辞改动**（之前的移植留下的，这次没有恢复）：`securityNotice`、`sourceCredentialManager`、`addApiDescription`（“Windows 凭据管理器”改成了“系统凭据存储”）、`systemOutputDescription`、`defaultMicrophoneDescription`、`autostart_not_applied`、`updates.status.unavailable`。这些只是措辞变中性，内容仍然正确，没有丢失处理建议，所以留给你决定（D2）。
 - **`a4ea843` 改变了所有平台的 OSC 行为**：“测试”按钮会绕过静音门，总是发送。这是一个合理的修复，但确实改变了 Windows 行为（D3）。
 - 自动检查更新开关被置灰以后，仍然显示为“开”的状态（截图中可见）；因为它是禁用的，功能上没有影响。
 - 托盘探测只检查 SNI watcher。只提供 XEmbed 托盘的桌面可能被误判为“没有托盘”，没有验证。
@@ -202,7 +208,7 @@ cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --form
 
 **背景**：`errors.audio.*` 中的处理建议是按 Windows 写的（独占模式、Windows Audio 服务、Windows 11 build 20348）。只要上游考虑支持第二个平台，就会遇到两个选择：要么改成中性措辞（Windows 用户会失去具体建议），要么按平台区分。
 
-**建议**：`localizedError`（`apps/desktop/src/app/app-utils.ts`）调用 `t()` 时传入 i18next 的 `context`（比如 `"linux"`）。平台专属的文案放在 `<key>_linux`，基础键保持 Windows 原文；没有变体的键会自动回退到基础键。fork 的 `b90a4b5` 是完整实现（含测试）：新增的 `platform-context.ts` 约 10 行，`app-utils.ts` 改 2 处。对只有 Windows 的上游来说，这个改动不会改变任何可见行为。
+**建议**：`localizedError`（`apps/desktop/src/app/app-utils.ts`）调用 `t()` 时传入 i18next 的 `context`（比如 `"linux"`）。平台专属的文案放在 `<key>_linux`，基础键保持 Windows 原文；没有变体的键会自动回退到基础键。fork 的 `b90a4b5`、`9b6b2a5` 是完整实现（含测试）：新增的 `platform-context.ts` 约 10 行，`app-utils.ts` 改 2 处。对只有 Windows 的上游来说，这个改动不会改变任何可见行为。
 
 **规模**：约 15 行加测试。**收益**：以后加平台时不用在两个平台的文案之间取舍。
 
@@ -268,7 +274,7 @@ cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --form
 | # | 事项 | 我的建议 |
 |---|---|---|
 | D1 | 按进程采集是否去掉“实验性”标签 | 先在真实的 VRChat/Proton 上按 `docs/Linux.md` 的端到端流程跑一次，干净的话就去掉（涉及 `AudioSettingsSection.tsx` 和 4 个语言文件） |
-| D2 | 4.1 中列出的其余 Windows 可见措辞：保留中性措辞，还是也改成 `_linux` 变体 | 用 3.4 的机制改成变体，让 Windows 端与上游完全一致；工作量小 |
+| D2 | 其余 Windows 可见措辞：保留中性措辞，还是也改成 `_linux` 变体 | **已完成**：按你的决定改成了变体，见 3.5 |
 | D3 | `a4ea843`（OSC 测试消息绕过静音门）在所有平台上生效 | 行为本身合理；如果要严格遵守“Windows 不变”，可以回退后改为向上游提 issue |
 | D4 | KnownIssues #1–#4（修复会改变 Windows 表现）在 fork 里修，还是只提给上游 | #3、#4 已写成上游草稿；#1、#2 收益很低，建议暂不处理 |
 | D5 | 挪威语乱码（#7）是否先在 fork 里修 | 等上游修（U2）；如果你近期要在 Windows 上用这个 fork 翻译挪威语，就先带上这 1 行 |
