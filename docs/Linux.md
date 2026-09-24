@@ -106,7 +106,7 @@ apps/desktop/src-tauri/target/release/bundle/deb/VRCS_<version>_amd64.deb
 apps/desktop/src-tauri/target/release/bundle/appimage/VRCS_<version>_amd64.AppImage
 ```
 
-Install the Debian package with `sudo dpkg -i <package>.deb`; it depends on `libwebkit2gtk-4.1-0`, `libgtk-3-0`, `libayatana-appindicator3-1`, and `libpipewire-0.3-0` (the desktop binary links the Core in-process, so the PipeWire client library is a hard runtime dependency). The AppImage is self-contained, so make it executable and run it directly. Add `-- --bundles deb` to build only one target.
+Install the Debian package with `sudo dpkg -i <package>.deb`; it depends on `libwebkit2gtk-4.1-0`, `libgtk-3-0`, `libayatana-appindicator3-1`, and `libpipewire-0.3-0 (>= 0.3.65)` (the desktop binary links the Core in-process, so the PipeWire client library is a hard runtime dependency; the minimum matches the `pipewire` crate's `v0_3_65` API level, and `target.object`, which device selection relies on, needs 0.3.64 or later). Distributions with an older PipeWire, such as Ubuntu 22.04 (0.3.48), refuse the package instead of installing a build whose device selection silently does not work. The AppImage is self-contained, so make it executable and run it directly. Add `-- --bundles deb` to build only one target.
 
 The bundles are not signed and do not include updater artifacts, so they are for local builds; the release pipeline with its signing keys lives in `scripts/build-release.ps1` (Windows).
 

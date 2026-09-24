@@ -136,9 +136,9 @@ jobs:
             echo "$deb"
             echo "  Depends: $depends"
             case "$depends" in
-              *libpipewire-0.3-0*) ;;
+              *"libpipewire-0.3-0 (>= 0.3.65)"*) ;;
               *)
-                echo "::error::$deb does not declare the PipeWire runtime dependency"
+                echo "::error::$deb does not declare the PipeWire runtime dependency with its minimum version"
                 exit 1
                 ;;
             esac

@@ -19,7 +19,7 @@
     },
     "linux": {
       "deb": {
-        "depends": ["libpipewire-0.3-0"]
+        "depends": ["libpipewire-0.3-0 (>= 0.3.65)"]
       }
     }
   }
