@@ -435,21 +435,68 @@ fn read_value(path: &Path, target_name: &str) -> Result<Option<String>, String> 
     Ok(credentials.remove(target_name))
 }
 
+/// 在凭据文件旁的锁文件上持有独占的建议锁，执行一次读-改-写。
+///
+/// 原子 `rename` 只保证读者看不到写了一半的文件；两个写者（例如桌面壳内置的 Core
+/// 与单独启动的开发用 Core）若各自读到旧内容再写回，后写的会把先写的键覆盖掉。
+/// 锁加在单独的文件上，因为凭据文件本身每次都会被 `rename` 替换成新的 inode。
+/// 锁随文件句柄关闭（包括进程退出）自动释放。读路径不加锁。
+#[cfg(not(windows))]
+fn with_store_lock<T>(
+    path: &Path,
+    update: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| format!("Invalid credential store path: {}", path.display()))?;
+    std::fs::create_dir_all(directory).map_err(|error| {
+        format!(
+            "Failed to create credential directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    let lock_path = path.with_extension("lock");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .map_err(|error| {
+            format!(
+                "Failed to open credential lock {}: {error}",
+                lock_path.display()
+            )
+        })?;
+    lock.lock().map_err(|error| {
+        format!(
+            "Failed to lock credential store {}: {error}",
+            lock_path.display()
+        )
+    })?;
+    update()
+}
+
 #[cfg(not(windows))]
 fn write_value(path: &Path, target_name: &str, value: &str) -> Result<(), String> {
-    let mut credentials = read_store(path)?;
-    credentials.insert(target_name.to_string(), value.to_string());
-    write_store(path, &credentials)
+    with_store_lock(path, || {
+        let mut credentials = read_store(path)?;
+        credentials.insert(target_name.to_string(), value.to_string());
+        write_store(path, &credentials)
+    })
 }
 
 /// 条目或文件不存在同样算删除成功，与 Windows 分支语义一致。
 #[cfg(not(windows))]
 fn delete_value(path: &Path, target_name: &str) -> Result<(), String> {
-    let mut credentials = read_store(path)?;
-    if credentials.remove(target_name).is_none() {
-        return Ok(());
-    }
-    write_store(path, &credentials)
+    with_store_lock(path, || {
+        let mut credentials = read_store(path)?;
+        if credentials.remove(target_name).is_none() {
+            return Ok(());
+        }
+        write_store(path, &credentials)
+    })
 }
 
 #[cfg(not(windows))]
@@ -574,12 +621,19 @@ mod tests {
             stored.get("VRCS/ExternalAPI/token").map(String::as_str),
             Some("secret")
         );
-        // 原子替换后不应留下临时文件。
-        let entries: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+        // 原子替换后不应留下临时文件；锁文件是常驻的，权限同样收紧。
+        let mut entries: Vec<String> = std::fs::read_dir(path.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(entries, ["credentials.json"]);
+        entries.sort();
+        assert_eq!(entries, ["credentials.json", "credentials.lock"]);
+        let lock_mode = std::fs::metadata(path.with_extension("lock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(lock_mode & 0o077, 0);
     }
 
     #[cfg(not(windows))]
@@ -617,6 +671,33 @@ mod tests {
         assert_eq!(read_value(&path, "VRCS/ExternalAPI/token").unwrap(), None);
         // 条目已不存在时再次删除仍是成功。
         assert!(delete_value(&path, "VRCS/ExternalAPI/token").is_ok());
+    }
+
+    /// 读-改-写之间没有互斥时，两个写者会各自读到旧内容，后写的把先写的键覆盖掉。
+    /// 每个线程各自打开文件，与两个进程共用同一份凭据文件时的情形相同。
+    #[cfg(not(windows))]
+    #[test]
+    fn concurrent_writers_do_not_lose_each_others_keys() {
+        const WRITERS: usize = 8;
+        const KEYS_PER_WRITER: usize = 25;
+
+        let (_directory, path) = temporary_store();
+        let threads: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for key in 0..KEYS_PER_WRITER {
+                        write_value(&path, &format!("VRCS/test/{writer}/{key}"), "secret").unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let stored = read_store(&path).unwrap();
+        assert_eq!(stored.len(), WRITERS * KEYS_PER_WRITER);
     }
 
     #[cfg(not(windows))]
