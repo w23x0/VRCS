@@ -16,9 +16,12 @@ runtime check was possible it was performed (see the evidence line).
 | 2 | Linux | Window shell | A failed `app_build_info` call leaves the undecorated window with no resize handles and no window-manager border | Windows shell code shares the component |
 | 3 | all | Settings → Software updates | Status line reads "Updates are not available for this build." for the moment before build info loads | Windows display |
 | 4 | all | Settings tab bar | `Debug` is the only category label not routed through i18n | Windows display |
-| 5 | Linux | Credential storage | Two processes writing credentials at once can lose one of the two keys | Linux-only fix, but needs a locking design |
-| 6 | Linux | Per-process capture | Captured application audio has been observed time-warped (already documented in `docs/Linux.md`) | Unverified cause |
+| 5 | Linux | Credential storage | **Fixed**: writes are serialized by an advisory lock | — |
+| 6 | Linux | Per-process capture | A time-warped capture was reported once; not reproducible with a Core-like harness | Needs a check with real VRChat under Proton |
 | 7 | all | Translation prompt | The Norwegian target-language label reaches the model as mojibake (`Norwegian Bokm姘搇`) | 1-line string fix plus a table-consistency test |
+| 8 | Linux | Capture, *System default* | The default-mode stream still pins `target.object` to the default at start; whether WirePlumber 0.5 then follows a default change is unverified | `audio/linux/capture.rs` `prepare` |
+| 9 | all | Per-process capture | After VRChat restarts (new pid) the capture keeps waiting on the old pid and stays silent until it is restarted | Both backends |
+| 10 | Linux | Desktop shell | `xdg-open` children (open logs folder, open VRCX-0 page) are never reaped and stay as zombies until VRCS exits | `diagnostics.rs`, `lib.rs` |
 
 ## 1. VR Overlay gate fails open when the status call fails
 
@@ -82,34 +85,34 @@ runtime check was possible it was performed (see the evidence line).
 - **Suggested fix**: add a `settings.categories.debug` key to all four locales and use `t(...)`.
 - **Why it was not fixed**: not introduced by the Linux work and not Linux-specific.
 
-## 5. Linux credential store has no cross-process lock
+## 5. Linux credential store has no cross-process lock — fixed
 
-- **Code**: `core/src/credentials.rs` (`read_store` / `write_store`, `#[cfg(not(windows))]`)
-- **What breaks**: every write is read-modify-write of the whole JSON file. Two processes that
-  share `$XDG_DATA_HOME/vrcs/credentials.json` (for example the desktop shell with its in-process
-  Core plus a standalone Core started for frontend development, or two shells) can interleave and
-  lose one of the two keys.
-- **Evidence**: within one process the writes are already serialized — every credential write path
-  holds `config_control` (`core/src/server/cloud.rs:252,303,347,395,418,451`,
-  `core/src/server/external.rs:44`, `core/src/server/vrcx.rs:35`). The atomic rename already
-  guarantees readers never see a half-written file; what can be lost is a concurrent key.
-- **Suggested fix**: take an advisory lock (`flock`) on a sibling lock file around the
-  read-modify-write, or make the Core the only writer.
-- **Why it was not fixed**: it needs a locking design decision (and the same question applies to
-  `config.json`), so it is out of scope for a review of the Linux port.
+- **Code**: `core/src/credentials.rs` (`with_store_lock`, `#[cfg(not(windows))]`)
+- **Was**: every write was an unguarded read-modify-write of the whole JSON file, so two processes
+  sharing `$XDG_DATA_HOME/vrcs/credentials.json` could lose one of two concurrent keys. A test with
+  8 writers x 25 distinct keys, each writer on its own file handles, kept only 24 of 200 keys.
+- **Now**: writes and deletes hold an exclusive `flock` on the sibling `credentials.lock` (0600) for
+  the read-modify-write; reads stay lock-free. The same test keeps 200/200.
+- **Still open**: `config.json` has the same shape of problem when two Cores share one configuration
+  file; that is a product decision (single writer vs. locking), not a platform fix.
 
-## 6. Per-process capture can deliver time-warped audio
+## 6. Per-process capture can deliver time-warped audio — not reproducible
 
 - **Documented in**: `docs/Linux.md`, "Per-process capture" (`Status: experimental`).
-- **State**: observed through the Core API, not reproduced on this machine — the two PipeWire tap
-  tests assert a 440 Hz tone peak measured at 16 kHz
-  (`core/src/audio/linux/mod.rs:442-484`) and pass against a live PipeWire session, and a probe of
-  the negotiated format shows `16000 Hz / 1 channel / F32LE` on all four capture paths (sink
-  monitor, microphone, `pw-play` tap, Pulse-protocol tap). Whatever produces the time warp is
-  therefore outside the paths the tests exercise; it has not been observed with the test harness.
-- **Next step**: reproduce with VRChat under Wine/Proton using the end-to-end recipe in
-  `docs/Linux.md`, then compare the negotiated format and the buffer pacing of the tapped stream
-  against the test harness.
+- **What was checked** (Ubuntu 24.04, PipeWire 1.0.5, WirePlumber 0.4.17): a throwaway in-crate probe
+  drove `AudioCapture` exactly like the Core — `start(None, Some("VRChat.exe"))` inside
+  `spawn_blocking` on a multi-thread runtime, with `list_devices()` polled every 500 ms alongside —
+  against a player process whose `comm` is `VRChat.exe`. Native (`pw-cat`) and PulseAudio-protocol
+  (`pacat`, how Wine plays audio) players, 48 kHz and 44.1 kHz streams on a 48 kHz graph: the 440 Hz
+  tone arrived at 440 Hz with the played level and ~16 000 frames/s, and synthesized speech tapped
+  the same way was accepted by the Silero VAD (324 of 370 chunks flagged as speech, two segments).
+- **One artifact worth knowing**: `pacat`/`paplay` choose their mode from `argv[0]`. A copy renamed to
+  `VRChat.exe` plays a WAV as *raw* 44.1 kHz data unless `--file-format=wav` is given, which shifts a
+  440 Hz tone to ~404 Hz — at the sink monitor too, so before VRCS sees it. A harness built that way
+  reproduces exactly the "right level and rate, no peak where expected" symptom described earlier.
+  Whether that explains the original report is not known.
+- **Next step**: one run with the real VRChat under Proton using the end-to-end recipe in
+  `docs/Linux.md`; if it is clean, the *experimental* label can go.
 
 ## 7. The Norwegian target-language label is corrupted in the LLM prompt
 
@@ -134,3 +137,35 @@ runtime check was possible it was performed (see the evidence line).
   and was left for the owner of that change to confirm the intended spelling.
 - **Verification**: `cargo test --manifest-path core/Cargo.toml --lib providers` with the
   consistency test above.
+
+## 8. *System default* capture pins the current default node
+
+- **Code**: `core/src/audio/linux/capture.rs` (`prepare`) and `devices::resolve_target`
+- **What happens**: with no device selected, `resolve_target` still resolves the current default
+  node and the stream carries it as `target.object`. With WirePlumber 0.4.17 the stream follows a
+  later default change anyway (verified with `wpctl set-default` mid-capture: the capture moved to
+  the new default's monitor), which matches WASAPI's `follows_default`. WirePlumber 0.5 treats
+  `target.object` as a defined target, so there the capture may stay on the old default.
+- **Suggested fix**: leave `target.object` unset in default mode and let the session manager route
+  the `stream.capture.sink` stream to the default.
+- **Why it was not fixed**: not reproducible on this machine (no WirePlumber 0.5), and the current
+  behaviour is correct where it could be tested.
+
+## 9. Per-process capture does not follow a restarted VRChat
+
+- **Code**: `core/src/audio.rs` `AudioCapture::start` resolves the pid once; both
+  `audio/linux/capture.rs` (tap by pid) and `audio/wasapi/capture.rs` (process loopback by pid)
+  keep that pid for the whole session.
+- **What breaks**: when VRChat exits and starts again, the new process is never tapped; capture keeps
+  running and produces no audio until the user stops and starts it.
+- **Why it was not fixed**: same behaviour on Windows, so it is a product change for both backends.
+
+## 10. `xdg-open` children are not reaped
+
+- **Code**: `apps/desktop/src-tauri/src/diagnostics.rs` `open_directory`,
+  `apps/desktop/src-tauri/src/lib.rs` `open_vrcx_repository`
+- **What happens**: `Command::spawn` without `wait`; unless something else reaps the child, each
+  click leaves a `<defunct>` process until VRCS exits. Found by reading the code, not observed at
+  runtime. Harmless in practice, but visible in `ps`.
+- **Suggested fix**: reap in a background thread, or use `tauri-plugin-opener`.
+

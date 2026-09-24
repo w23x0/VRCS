@@ -6,7 +6,7 @@ Both entry points work on Linux: the Tauri desktop shell (packaged as `.deb` and
 
 ## Build prerequisites
 
-Verified on Ubuntu 26.04 (x64) with PipeWire 1.6.2 and WirePlumber.
+Verified on Ubuntu 26.04 (x64) with PipeWire 1.6.2 and WirePlumber, and on Ubuntu 24.04 (x64) with PipeWire 1.0.5 and WirePlumber 0.4.17 (build, both crates' tests, frontend tests, `.deb`/`.AppImage` bundles). The capture backend is built against the `pipewire` crate's `v0_3_65` API level; older PipeWire releases have not been tested.
 
 - Rust stable
 - Node.js 24+ (frontend only)
@@ -119,10 +119,11 @@ The bundles are not signed and do not include updater artifacts, so they are for
 - Sample rate comes from the PipeWire graph rate (`clock.rate` in the `settings` metadata, with `default.clock.rate` accepted as a legacy fallback); the channel count of a device is its node's `audio.channels`, and the default device is determined from the `default` metadata.
 - Per-process capture taps the target application's audio output streams; see below. If the tap cannot be created the capture reports `audio.process_loopback_unavailable` instead of silently falling back to whole-system audio.
 - Device endpoints are PipeWire `node.name` values, not WASAPI endpoint ids, so an audio configuration copied from Windows does not carry over.
+- A device chosen explicitly stays chosen, as with WASAPI: the stream carries `node.dont-reconnect`, so the session manager neither moves it to a new default device nor falls back to another device when it disappears. If the selected device goes away the capture stops with an error instead of silently recording something else. **System default** follows the default device when it changes (verified with WirePlumber 0.4.17; see issue 8 in [Known issues](KnownIssues.md) for WirePlumber 0.5).
 
 ### Per-process capture
 
-> **Status: experimental.** The mechanism is covered by integration tests (they verify the tapped tone's spectrum and that a second application's audio is excluded), but it has also been observed delivering unusable audio when the mode is started through the Core's API: the captured stream had the right level and rate yet its content was time-warped (no spectral peak in the captured tone where the test harness measures one), so the VAD rejected it and no subtitles were produced — silently. The same symptom reproduces with a build from before the current changes, so it is not a regression. Until it is understood, prefer **System output** (which captures everything the machine plays) if you see no subtitles while VRChat is speaking; the settings UI marks this option as experimental. Tracked as issue 6 in [Known issues](KnownIssues.md), which also records what the tests have already ruled out.
+> **Status: experimental.** The mechanism is covered by integration tests (they verify the tapped tone's spectrum and that a second application's audio is excluded). A time-warped capture was reported earlier when the mode was started through the Core; it could not be reproduced when the capture is driven exactly like the Core does (lookup by the process name `VRChat.exe`, `spawn_blocking` start, concurrent device polling), with a native and a PulseAudio-protocol player, 44.1 and 48 kHz streams: the tone arrived at the right frequency and level, and synthesized speech was accepted by the Silero VAD. It has not yet been checked with the real VRChat under Proton, so the option stays marked experimental; if you see no subtitles while VRChat is speaking, use **System output**. Tracked as issue 6 in [Known issues](KnownIssues.md).
 
 Selecting VRChat (or any single application) as the source resolves the process id, then finds the
 audio output streams that belong to that process and links their output ports to a private capture
@@ -177,7 +178,7 @@ toolkit's runtime libraries (`cublas`, `cublasLt`, `cudart`, and `culibos` where
 | Installers (deb/AppImage) | ✅ `npm --workspace apps/desktop run build:linux` |
 | In-app updater | ❌ not compiled off Windows; the build reports updates as unavailable |
 
-Credential storage details: the path is `$XDG_DATA_HOME/vrcs/credentials.json` (`XDG_DATA_HOME` defaults to `~/.local/share`), the file is written with mode `0600` using a temporary file plus atomic rename, and environment variable overrides keep their existing precedence over stored values.
+Credential storage details: the path is `$XDG_DATA_HOME/vrcs/credentials.json` (`XDG_DATA_HOME` defaults to `~/.local/share`), the file is written with mode `0600` using a temporary file plus atomic rename, writes from several processes are serialized by an advisory lock on the sibling `credentials.lock`, and environment variable overrides keep their existing precedence over stored values.
 
 Data root: the desktop shell keeps its configuration, model files, subtitle database and credentials in `$XDG_DATA_HOME/vrcs` (`~/.local/share/vrcs`), and writes logs to `$XDG_STATE_HOME/vrcs/logs` (`~/.local/state/vrcs/logs`). An installation created while the shell still used the hidden `$XDG_DATA_HOME/.vrcs` directory is moved to the new location on first start; if that move fails the old directory stays in use (with a warning in the log), so an existing configuration and history are never silently abandoned.
 
@@ -192,7 +193,8 @@ npm --workspace apps/desktop test
 ```
 
 - The PipeWire capture integration test in `core/src/audio/linux/mod.rs` needs a live PipeWire session and skips itself when it cannot connect.
-- That test also plays a test tone through `pw-play` (from `pipewire-bin` on Debian/Ubuntu) and skips when the command is missing. It creates its own null sink with a low session priority, so it does not take over the default device.
+- That test also plays a test tone through `pw-play` (from `pipewire-bin` on Debian/Ubuntu) and skips when the command is missing. It creates its own null sink with a low session priority, so it does not take over the default device on a machine with a sound card. Without one (a VM or CI runner), each test sink becomes the default in turn; the test players set `node.dont-reconnect` so the session manager does not move them between the tests' sinks.
+- The PulseAudio-protocol tap test uses `paplay` from `pulseaudio-utils` and `pipewire-pulse`, and skips when `paplay` is missing.
 
 ### End-to-end check of the capture path
 
