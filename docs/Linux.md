@@ -56,7 +56,7 @@ Environment variables read by the Core:
 
 | Variable | Effect |
 |---|---|
-| `VRCS_CONFIG` | Configuration file path (default `config.json`) |
+| `VRCS_CONFIG` | Configuration file path (default `config.json`). One configuration file belongs to one running Core: never point a standalone Core at the desktop app's `~/.local/share/vrcs/config.json` while the app runs |
 | `VRCS_HOST` | Bind address (default `127.0.0.1`) |
 | `VRCS_PORT` | Bind port (default `8766`) |
 | `VRCS_SESSION_TOKEN` | Session token. When unset, a random token is generated and printed to stderr at startup. Binding to a non-loopback address requires an explicit non-empty token. |
@@ -74,6 +74,8 @@ VRCS_SESSION_TOKEN=devtoken VRCS_CONFIG=/tmp/vrcs-dev/config.json VRCS_PORT=8766
 ## Frontend development loop
 
 The full UI runs in a browser against a standalone Core; no Tauri or WebKit is involved.
+
+The Core is the only writer of its configuration file (the desktop shell only passes the path, the UI changes settings through the Core API), and it assumes nobody else writes that file. Give the standalone Core its own `VRCS_CONFIG`, as below, rather than the desktop app's configuration: two Cores on one file would overwrite each other's changes. Credentials are the exception, because `credentials.json` is shared by design and its writes are locked.
 
 ```bash
 npm install

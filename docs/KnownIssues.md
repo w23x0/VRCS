@@ -93,8 +93,9 @@ runtime check was possible it was performed (see the evidence line).
   8 writers x 25 distinct keys, each writer on its own file handles, kept only 24 of 200 keys.
 - **Now**: writes and deletes hold an exclusive `flock` on the sibling `credentials.lock` (0600) for
   the read-modify-write; reads stay lock-free. The same test keeps 200/200.
-- **Still open**: `config.json` has the same shape of problem when two Cores share one configuration
-  file; that is a product decision (single writer vs. locking), not a platform fix.
+- **`config.json`**: has the same shape of problem when two Cores share one configuration file. Decided:
+  the Core stays the single writer of its configuration and no lock is added; `docs/Linux.md` states
+  that a standalone Core must not share the desktop app's configuration file.
 
 ## 6. Per-process capture can deliver time-warped audio — not reproducible
 
