@@ -152,6 +152,11 @@ fn prepare(plan: &CapturePlan, rate: u32) -> Result<Prepared, AudioError> {
             if let Some(node_name) = node_name.as_deref() {
                 props.insert(*pw::keys::TARGET_OBJECT, node_name);
             }
+            if endpoint.is_some() {
+                // 用户明确选了设备：与 WASAPI 一致，留在这个设备上。否则 WirePlumber 会在
+                // 默认设备变化时把流挪到新的默认设备上，界面上显示的仍是用户选的那个。
+                props.insert(*pw::keys::NODE_DONT_RECONNECT, "true");
+            }
             Ok(Prepared {
                 device,
                 props,
