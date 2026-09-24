@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { DeviceGroup } from "../../settings/SettingsControls";
 import type { AudioDevice } from "../../capture/types";
+import { platformContext } from "../../i18n/platform-context";
 import type { Settings } from "../../settings/types";
 
 export function AudioStep({
@@ -48,7 +49,7 @@ export function AudioStep({
         devicesReady={devicesReady}
         selectedDeviceId={settings.audio.output.mode === "system" ? settings.audio.output.device_id : null}
         specialRows={[
-          { key: "system", name: t("settings.audio.systemOutput"), description: t("settings.audio.systemOutputDescription"), chosen: settings.audio.output.mode === "system" && settings.audio.output.device_id === null, onSelect: () => onUpdateSettings((current) => ({ ...current, audio: { ...current.audio, output: { ...current.audio.output, mode: "system", device_id: null } } })) },
+          { key: "system", name: t("settings.audio.systemOutput"), description: t("settings.audio.systemOutputDescription", { context: platformContext() }), chosen: settings.audio.output.mode === "system" && settings.audio.output.device_id === null, onSelect: () => onUpdateSettings((current) => ({ ...current, audio: { ...current.audio, output: { ...current.audio.output, mode: "system", device_id: null } } })) },
           { key: "vrchat", name: "VRChat", description: t("settings.audio.vrchatDescription"), chosen: settings.audio.output.mode === "vrchat", onSelect: () => onUpdateSettings((current) => ({ ...current, audio: { ...current.audio, output: { ...current.audio.output, mode: "vrchat", device_id: null } } })) },
           { key: "disabled", name: t("settings.audio.disableOtherVoices"), description: t("settings.audio.disableOtherVoicesDescription"), chosen: settings.audio.output.mode === "disabled", onSelect: () => onUpdateSettings((current) => ({ ...current, audio: { ...current.audio, output: { ...current.audio.output, mode: "disabled", device_id: null } } })) },
         ]}
@@ -63,7 +64,7 @@ export function AudioStep({
         devicesReady={devicesReady}
         selectedDeviceId={settings.audio.microphone.mode === "device" ? settings.audio.microphone.device_id : null}
         specialRows={[
-          { key: "default", name: t("settings.audio.defaultMicrophone"), description: t("settings.audio.defaultMicrophoneDescription"), chosen: settings.audio.microphone.mode === "default", onSelect: () => { onSetMicrophoneReviewed(false); onUpdateSettings((current) => ({ ...current, audio: { ...current.audio, microphone: { ...current.audio.microphone, mode: "default", device_id: null } } })); } },
+          { key: "default", name: t("settings.audio.defaultMicrophone"), description: t("settings.audio.defaultMicrophoneDescription", { context: platformContext() }), chosen: settings.audio.microphone.mode === "default", onSelect: () => { onSetMicrophoneReviewed(false); onUpdateSettings((current) => ({ ...current, audio: { ...current.audio, microphone: { ...current.audio.microphone, mode: "default", device_id: null } } })); } },
           { key: "disabled", name: t("settings.audio.disableMicrophone"), description: t("settings.audio.disableMicrophoneDescription"), chosen: settings.audio.microphone.mode === "disabled", onSelect: () => { onSetMicrophoneReviewed(true); onUpdateSettings((current) => ({ ...current, audio: { ...current.audio, microphone: { ...current.audio.microphone, mode: "disabled", device_id: null } } })); } },
         ]}
         disabled={audioBusy}

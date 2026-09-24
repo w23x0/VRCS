@@ -2,6 +2,7 @@ import { RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { PreferenceToggle } from "../settings/SettingsControls";
+import { platformContext } from "../i18n/platform-context";
 import type { AppUpdaterState } from "./useAppUpdater";
 
 function updateStatusKey(updater: AppUpdaterState): string {
@@ -36,6 +37,7 @@ export function SoftwareUpdateSettings({ updater }: { updater: AppUpdaterState }
           <small>{t(`updates.variant.${updater.buildInfo?.variant ?? "standard"}`)}</small>
           <p className={updater.phase === "error" ? "error" : ""}>{t(statusKey, {
             version: updater.update?.version,
+            context: platformContext(),
           })}</p>
         </div>
         <button

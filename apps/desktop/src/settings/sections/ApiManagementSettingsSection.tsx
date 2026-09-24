@@ -13,6 +13,7 @@ import {
   createApiProfileDraft,
   type ApiProfileEditorDraft,
 } from "../../api-profile-draft";
+import { platformContext } from "../../i18n/platform-context";
 import { profileEnabledCapabilities, providerDefinition, providerDetail } from "../../provider-catalog";
 import { recognitionServicesForProfile } from "../../recognition-services";
 import { translationDiagnosticModel } from "../../translation-model-selection";
@@ -138,7 +139,7 @@ export function ApiManagementSettingsSection({
       </div>
       <div className="api-security-note">
         <ShieldCheck size={18} aria-hidden="true" />
-        <p>{t("settings.apiManagement.securityNotice")}</p>
+        <p>{t("settings.apiManagement.securityNotice", { context: platformContext() })}</p>
       </div>
 
       <div className="api-profile-list" aria-busy={profiles.loading || undefined}>
