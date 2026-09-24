@@ -214,10 +214,17 @@ mod tests {
             .ok()
     }
 
+    /// 用 pw-play 往指定 sink 里放音。
+    ///
+    /// `node.dont-reconnect` 让 session manager 不再迁移这条流：在没有真实声卡的机器上，
+    /// 测试建的空 sink 会轮流成为默认 sink，而 WirePlumber 会把正好停在旧默认 sink 上的
+    /// 流挪到新的默认 sink 上，于是一个测试的音调会串进另一个测试的 sink。
     fn play_in_background(path: &std::path::Path, target: &str) -> Option<Child> {
         Command::new("pw-play")
             .arg("--target")
             .arg(target)
+            .arg("--properties")
+            .arg("{ node.dont-reconnect = true }")
             .arg(path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
