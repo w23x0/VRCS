@@ -64,3 +64,83 @@ jobs:
         run: |
           cargo test --manifest-path core/Cargo.toml --locked
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            core
+            apps/desktop/src-tauri
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake libssl-dev pkg-config clang libclang-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Point bindgen at the gcc include directory
+        run: echo "BINDGEN_EXTRA_CLANG_ARGS=-I$(gcc -print-file-name=include)" >> "$GITHUB_ENV"
+
+      - name: Check formatting
+        run: |
+          cargo fmt --manifest-path core/Cargo.toml -- --check
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+
+      - name: Run Clippy
+        run: |
+          cargo clippy --manifest-path core/Cargo.toml --all-targets --locked -- -D warnings
+          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+
+      - name: Test Rust
+        run: |
+          cargo test --manifest-path core/Cargo.toml --lib --locked
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --locked
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Linux bundles
+        run: npm --workspace apps/desktop run build:linux
+
+      - name: Verify Linux bundles
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(apps/desktop/src-tauri/target/release/bundle/deb/*.deb)
+          appimages=(apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage)
+          if [ "${#debs[@]}" -eq 0 ]; then
+            echo "::error::build:linux produced no .deb in bundle/deb"
+            exit 1
+          fi
+          if [ "${#appimages[@]}" -eq 0 ]; then
+            echo "::error::build:linux produced no .AppImage in bundle/appimage"
+            exit 1
+          fi
+          for deb in "${debs[@]}"; do
+            depends="$(dpkg-deb -f "$deb" Depends)"
+            echo "$deb"
+            echo "  Depends: $depends"
+            case "$depends" in
+              *"libpipewire-0.3-0 (>= 0.3.65)"*) ;;
+              *)
+                echo "::error::$deb does not declare the PipeWire runtime dependency with its minimum version"
+                exit 1
+                ;;
+            esac
+          done
+          printf 'AppImage: %s\n' "${appimages[@]}"

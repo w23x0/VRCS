@@ -47,7 +47,7 @@ You can change the configuration at any time in the application. To run the setu
 
 ### Real-time subtitles and audio
 
-- Windows WASAPI system loopback, dedicated VRChat process loopback, and microphone capture
+- System loopback (Windows WASAPI, Linux PipeWire), dedicated VRChat process loopback, and microphone capture
 - Dual-stream transcription for system audio and microphone input, with independent audio source and device controls
 - Silero ONNX VAD with automatic fallback to energy-based detection when the model is unavailable
 - Optional Smart Turn semantic endpointing for locally controlled speech segments
@@ -74,7 +74,7 @@ You can change the configuration at any time in the application. To run the setu
 
 - Send final microphone subtitles and translations to the VRChat OSC Chatbox
 - Quick Chatbox input, translation preview, formatting, and 144-character handling
-- Synchronize VRChat's `MuteSelf` state through OSCQuery and block automatic sending when muted or when the state is unknown
+- Synchronize VRChat's `MuteSelf` state through OSCQuery and block automatic sending when muted or when the state is unknown. The settings test message is always sent, so the connection can be verified before automatic sending is available
 - SteamVR VR Overlay with headset subtitles and a wrist-mounted conversation view
 - Configure the overlay to show original text, translations, or both; select system audio, microphone, and Chatbox sources; and adjust position, size, opacity, and display duration
 
@@ -98,7 +98,7 @@ When using local Whisper, speech is not sent to the cloud. When using cloud reco
 
 Development requirements:
 
-- Windows 10 or 11
+- Windows 10 or 11, or Linux (see [docs/Linux.md](docs/Linux.md))
 - Node.js 24+
 - Rust stable
 - Visual Studio Build Tools with the **Desktop development with C++** workload
@@ -123,6 +123,8 @@ npm run dev:core:cuda
 ```
 
 The standalone Core listens on `http://127.0.0.1:8766` by default, and its subtitle WebSocket is available at `ws://127.0.0.1:8766/ws`. The desktop application automatically generates and manages a local session token. If you run the Core separately and bind it to a non-loopback address, you must explicitly set a non-empty `VRCS_SESSION_TOKEN`.
+
+On Linux, build prerequisites, run and test commands, capture semantics, and the supported feature set are documented in [docs/Linux.md](docs/Linux.md). Confirmed defects that are still open, including the ones found while auditing Linux support, are listed in [docs/KnownIssues.md](docs/KnownIssues.md).
 
 ## Testing
 

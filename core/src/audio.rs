@@ -1,5 +1,6 @@
 //! 音频采集公共接口与生命周期管理。
-//! Windows 的设备枚举、WASAPI 采集和 PCM 转换位于 `audio/wasapi/`。
+//! Windows 的设备枚举、WASAPI 采集和 PCM 转换位于 `audio/wasapi/`，
+//! Linux 的 PipeWire 采集位于 `audio/linux/`。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -9,7 +10,11 @@ use tokio::sync::mpsc;
 
 use crate::models::AudioDevice;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as platform;
+#[cfg(all(not(windows), not(target_os = "linux")))]
 mod platform;
 #[cfg(windows)]
 mod wasapi;
@@ -57,6 +62,8 @@ impl AudioError {
         self.code
     }
 
+    /// 仅 WASAPI 后端使用（进程回环失败时回退归类）；Linux 后端总是给出明确的错误码。
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn with_default_code(mut self, code: &'static str) -> Self {
         if self.code == "audio.unavailable" {
             self.code = code;
@@ -143,14 +150,11 @@ impl AudioCapture {
             CaptureSource::Microphone => platform::DeviceDirection::Capture,
         };
         let target = match device_id {
-            Some(id) => platform::CaptureTarget::Device {
-                wasapi_id: Some(platform::resolve_device_id(id, self.source)?),
+            Some(id) => platform::CaptureTarget::device(
+                Some(platform::resolve_device_id(id, self.source)?),
                 direction,
-            },
-            None => platform::CaptureTarget::Device {
-                wasapi_id: None,
-                direction,
-            },
+            ),
+            None => platform::CaptureTarget::device(None, direction),
         };
         self.start_session(target)
     }

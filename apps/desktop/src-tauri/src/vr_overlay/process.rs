@@ -1,7 +1,7 @@
-const STEAMVR_SERVER_PROCESS: &str = "vrserver.exe";
-
 #[cfg(windows)]
 pub fn steamvr_running() -> bool {
+    const STEAMVR_SERVER_PROCESS: &str = "vrserver.exe";
+
     use std::mem::{size_of, zeroed};
 
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};

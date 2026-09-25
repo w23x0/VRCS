@@ -1,3 +1,7 @@
+//! OpenVR 变换矩阵。调用方只有 Windows 的 OpenVR 后端（`backend.rs` 的 platform 模块），
+//! 因此其它平台上这些函数在非测试构建里没有使用者。
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use vrcs_core::{VrOverlayHeadsetConfig, VrOverlayWristConfig};
 
 pub fn headset(config: &VrOverlayHeadsetConfig) -> [[f32; 4]; 3] {

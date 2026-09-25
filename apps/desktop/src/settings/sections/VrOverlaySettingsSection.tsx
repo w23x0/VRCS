@@ -179,9 +179,6 @@ export function VrOverlaySettingsSection({
   };
 
   const saving = saveState === "saving";
-  const overlayDisabled = saving || !draft.vr_overlay.enabled;
-  const headsetDisabled = overlayDisabled || !draft.vr_overlay.headset.enabled;
-  const wristDisabled = overlayDisabled || !draft.vr_overlay.wrist.enabled;
   const headsetStatus = status?.headset;
   const wristStatus = status?.wrist;
 
@@ -189,6 +186,16 @@ export function VrOverlaySettingsSection({
   const runtimeStateKey = runtimeStates.includes(runtimeState)
     ? runtimeState
     : "error";
+  // The native side reports `unsupported` on every platform without the
+  // overlay runtime, where the runtime and sample commands are inert. Treat it
+  // as a hard gate so the controls cannot pretend to work; the runtime badge
+  // below (and the runtime description) is what explains the state. Windows
+  // therefore keeps the exact behavior it has today, since its state is never
+  // `unsupported`.
+  const overlayUnsupported = runtimeState === "unsupported";
+  const overlayDisabled = saving || overlayUnsupported || !draft.vr_overlay.enabled;
+  const headsetDisabled = overlayDisabled || !draft.vr_overlay.headset.enabled;
+  const wristDisabled = overlayDisabled || !draft.vr_overlay.wrist.enabled;
   const headsetState = headsetStatus?.state ?? "disabled";
   const headsetStateKey = resourceStates.includes(headsetState) ? headsetState : "error";
   const wristState = wristStatus?.state ?? "disabled";
@@ -236,14 +243,14 @@ export function VrOverlaySettingsSection({
             <PreferenceToggle
               title={t("settings.vrOverlay.enable")}
               checked={draft.vr_overlay.enabled}
-              disabled={saving}
+              disabled={saving || overlayUnsupported}
               onChange={(enabled) => applySettings((current) => patchVrOverlay(current, { enabled }))}
             />
           </div>
           <button
             className="secondary-button"
             type="button"
-            disabled={nativeBusy !== null || status?.state === "unsupported"}
+            disabled={nativeBusy !== null || overlayUnsupported}
             onClick={() => void runNativeAction("retry", retryVrOverlay)}
           >
             <RefreshCw size={15} />{t("common.retry")}

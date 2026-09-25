@@ -48,6 +48,12 @@ windows = { version = "0.62", features = [
   "Win32_System_LibraryLoader",
 ] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = { version = "0.10", features = ["v0_3_65"] }
+# `libc` 用于按需加载 NVIDIA 驱动（dlopen "libcuda.so.1"），与 Windows 上的 nvcuda.dll 对称。
+libc = "0.2"
+
+
 [dev-dependencies]
 tempfile = "3"
 hound = "3.5"

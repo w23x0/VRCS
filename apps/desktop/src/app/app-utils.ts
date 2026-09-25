@@ -1,6 +1,7 @@
 import type { TFunction } from "i18next";
 
 import { ApiError, formatApiErrorMessage } from "../api-error";
+import { platformContext } from "../i18n/platform-context";
 
 export function timestamp(value: string, locale: string): string {
   return new Intl.DateTimeFormat(locale, {
@@ -18,6 +19,7 @@ export function localizedError(
   if (reason instanceof ApiError) {
     const localized = t(`errors.${reason.code}`, {
       ...reason.params,
+      context: platformContext(),
       defaultValue: missing,
     });
     if (localized === missing) return reason.detail || t(fallbackKey);
@@ -33,7 +35,10 @@ export function localizedError(
     && "code" in reason
     && typeof reason.code === "string"
   ) {
-    const localized = t(`errors.${reason.code}`, { defaultValue: missing });
+    const localized = t(`errors.${reason.code}`, {
+      context: platformContext(),
+      defaultValue: missing,
+    });
     if (localized !== missing) return localized;
     return "detail" in reason && typeof reason.detail === "string" && reason.detail
       ? reason.detail

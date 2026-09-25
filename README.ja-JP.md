@@ -47,7 +47,7 @@ VRCS は、VRChat 向けの Windows リアルタイム字幕・言語学習ツ�
 
 ### リアルタイム字幕と音声
 
-- Windows WASAPI システムループバック、VRChat プロセス専用ループバック、マイクキャプチャ
+- システムループバック（Windows WASAPI / Linux PipeWire）、VRChat プロセス専用ループバック、マイクキャプチャ
 - システム音声とマイクの2系統文字起こし。音声ソースとデバイスを個別に制御可能
 - Silero ONNX VAD。モデルを利用できない場合はエネルギーベース検出へ自動的にフォールバック
 - ローカルで終了時機を制御できる音声区間向けの、任意の Smart Turn 意味ベース区切り
@@ -98,7 +98,7 @@ VRCS は元の音声を保存しません。字幕履歴、セッション、学
 
 開発環境：
 
-- Windows 10 / 11
+- Windows 10 / 11、または Linux（[docs/Linux.md](docs/Linux.md) を参照）
 - Node.js 24+
 - Rust stable
 - Visual Studio Build Tools と「C++ によるデスクトップ開発」ワークロード

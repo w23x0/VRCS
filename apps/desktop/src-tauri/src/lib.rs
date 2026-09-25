@@ -53,10 +53,11 @@ struct CoreRuntime {
     stop_requested: AtomicBool,
 }
 
-struct NativeUiState {
+pub(crate) struct NativeUiState {
     show_item: Mutex<Option<MenuItem<tauri::Wry>>>,
     quit_item: Mutex<Option<MenuItem<tauri::Wry>>>,
     compact_topmost: AtomicBool,
+    pub(crate) tray_available: AtomicBool,
 }
 
 const DEFAULT_CORE_PORT: u16 = 8766;
@@ -334,6 +335,55 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// Decides whether a close request on the main window hides it into the tray.
+///
+/// Hiding is only safe while the tray icon exists, because the tray (or its
+/// "Show VRCS" item) is the only way back to a hidden window. On Linux the tray
+/// is missing whenever the desktop has no StatusNotifier/appindicator host, so
+/// hiding there would leave a running process whose window cannot be restored;
+/// the close must really close instead.
+fn should_hide_on_close(preference: bool, tray_available: bool) -> bool {
+    preference && tray_available
+}
+
+/// Whether a tray icon can actually be seen on this desktop.
+///
+/// On Linux `TrayIconBuilder::build` only proves that the appindicator library loaded: it never
+/// asks the session bus, so it succeeds on a desktop that has no StatusNotifier host, where the
+/// icon stays invisible. The close-to-tray path must not trust it, or the window would hide
+/// behind an icon that is not on screen. A bus that cannot be reached, or an unexpected reply,
+/// counts as available: a probe failure must not silently remove a tray that works.
+#[cfg(target_os = "linux")]
+fn tray_host_available() -> bool {
+    const WATCHERS: [&str; 2] = [
+        "org.kde.StatusNotifierWatcher",
+        "org.x.StatusNotifierWatcher",
+    ];
+
+    let Ok(connection) = zbus::blocking::Connection::session() else {
+        return true;
+    };
+    WATCHERS.iter().any(|watcher| {
+        connection
+            .call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "NameHasOwner",
+                &(*watcher,),
+            )
+            .ok()
+            .and_then(|reply| reply.body().deserialize::<bool>().ok())
+            .unwrap_or(true)
+    })
+}
+
+/// Windows and macOS always have a tray area; nothing to probe.
+#[cfg(not(target_os = "linux"))]
+fn tray_host_available() -> bool {
+    true
+}
+
 fn minimize_to_tray_enabled(app: &tauri::AppHandle) -> bool {
     app.store("preferences.json")
         .ok()
@@ -399,6 +449,55 @@ fn stop_core(app: &tauri::AppHandle) {
     }
 }
 
+/// Resolves the directory that holds the VRCS configuration, history and models.
+///
+/// Windows and macOS keep the historical `.vrcs` directory inside the app's
+/// local data directory. Linux uses `$XDG_DATA_HOME/vrcs` instead: a dot-prefixed
+/// directory is not the XDG convention for an application directory, and `vrcs`
+/// is exactly the root the Core uses for `credentials.json`, so the old name
+/// split one installation across a visible and a hidden directory.
+fn resolve_data_dir(local_data_dir: PathBuf) -> PathBuf {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let current = local_data_dir.join("vrcs");
+        let legacy = local_data_dir.join(".vrcs");
+        migrate_legacy_data_dir(&current, &legacy)
+    }
+
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        local_data_dir.join(".vrcs")
+    }
+}
+
+/// Moves a pre-existing `.vrcs` directory to the new Linux data root and returns
+/// the directory the app must use.
+///
+/// The rename only runs while the legacy directory is the surviving one, so an
+/// already migrated install is never touched. When the rename fails the legacy
+/// directory is returned rather than `current`: starting from an empty data root
+/// while the user's configuration and history are still on disk is the one
+/// outcome that must not happen.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn migrate_legacy_data_dir(current: &std::path::Path, legacy: &std::path::Path) -> PathBuf {
+    if current.exists() || !legacy.exists() {
+        return current.to_path_buf();
+    }
+
+    match std::fs::rename(legacy, current) {
+        Ok(()) => current.to_path_buf(),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                legacy = %legacy.display(),
+                current = %current.display(),
+                "VRCS data directory could not be migrated; continuing with the legacy path"
+            );
+            legacy.to_path_buf()
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let log_dir = diagnostics::desktop_log_dir();
@@ -437,6 +536,7 @@ pub fn run() {
             show_item: Mutex::new(None),
             quit_item: Mutex::new(None),
             compact_topmost: AtomicBool::new(false),
+            tray_available: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             core_connection,
@@ -465,15 +565,6 @@ pub fn run() {
             let show_item = MenuItem::with_id(app, "show", "Show VRCS", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit VRCS", true, None::<&str>)?;
             let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
-            let native_ui = app.state::<NativeUiState>();
-            *native_ui
-                .show_item
-                .lock()
-                .expect("native UI state lock poisoned") = Some(show_item.clone());
-            *native_ui
-                .quit_item
-                .lock()
-                .expect("native UI state lock poisoned") = Some(quit_item.clone());
             let mut tray = TrayIconBuilder::new()
                 .tooltip("VRCS")
                 .menu(&tray_menu)
@@ -496,9 +587,42 @@ pub fn run() {
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
             }
-            tray.build(app)?;
 
-            let data_dir = app.path().local_data_dir()?.join(".vrcs");
+            // On Linux the tray needs a StatusNotifier host: an appindicator
+            // library plus a panel that implements the protocol, which many
+            // minimal desktops lack. Losing the icon must never stop VRCS from
+            // starting, so a tray failure is logged and startup continues.
+            let native_ui = app.state::<NativeUiState>();
+            match tray.build(app) {
+                Ok(_) => {
+                    // 图标建好了不等于看得见：没有 host 时它不会出现在面板上，
+                    // 因此"最小化到托盘"的开关要以探测结果为准。
+                    let visible = tray_host_available();
+                    if !visible {
+                        tracing::warn!(
+                            "no StatusNotifier host on the session bus; the tray icon stays \
+                             invisible and minimize-to-tray is disabled"
+                        );
+                    }
+                    native_ui.tray_available.store(visible, Ordering::Release);
+                    *native_ui
+                        .show_item
+                        .lock()
+                        .expect("native UI state lock poisoned") = Some(show_item.clone());
+                    *native_ui
+                        .quit_item
+                        .lock()
+                        .expect("native UI state lock poisoned") = Some(quit_item.clone());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "system tray is unavailable; VRCS keeps running without a tray icon"
+                    );
+                }
+            }
+
+            let data_dir = resolve_data_dir(app.path().local_data_dir()?);
             std::fs::create_dir_all(data_dir.join("models"))?;
 
             let port = setup_connection
@@ -533,7 +657,16 @@ pub fn run() {
                     }
                 }
                 if let WindowEvent::CloseRequested { api, .. } = event {
-                    if minimize_to_tray_enabled(window.app_handle()) {
+                    let tray_available = window
+                        .app_handle()
+                        .state::<NativeUiState>()
+                        .tray_available
+                        .load(Ordering::Acquire);
+                    let hide = should_hide_on_close(
+                        minimize_to_tray_enabled(window.app_handle()),
+                        tray_available,
+                    );
+                    if hide {
                         api.prevent_close();
                         let _ = window.hide();
                     }
@@ -584,7 +717,7 @@ pub fn release_self_test() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{core_connection_config, DEFAULT_CORE_PORT};
+    use super::{core_connection_config, should_hide_on_close, DEFAULT_CORE_PORT};
 
     const CAPABILITIES: &str = include_str!("../capabilities/default.json");
 
@@ -612,5 +745,159 @@ mod tests {
         assert_eq!(DEFAULT_CORE_PORT, 8766);
         assert!(![8765, 9000, 9001].contains(&DEFAULT_CORE_PORT));
         assert!(!core_connection_config().token.is_empty());
+    }
+
+    #[test]
+    fn closing_only_hides_the_window_with_a_tray_and_the_preference() {
+        assert!(should_hide_on_close(true, true));
+        assert!(!should_hide_on_close(true, false));
+        assert!(!should_hide_on_close(false, true));
+        assert!(!should_hide_on_close(false, false));
+    }
+
+    /// 探测必须如实反映总线：没有 watcher 就是"不可用"，而不是"库加载成功"。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn tray_host_probe_reports_no_watcher_on_a_private_bus() {
+        // 子进程跑在 `dbus-run-session` 新建的会话总线上，上面没有任何 StatusNotifier host。
+        if std::env::var_os("VRCS_TRAY_PROBE_CHILD").is_some() {
+            assert!(!super::tray_host_available());
+            return;
+        }
+        let status = std::process::Command::new("dbus-run-session")
+            .arg("--")
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::tray_host_probe_reports_no_watcher_on_a_private_bus",
+                "--nocapture",
+            ])
+            .env("VRCS_TRAY_PROBE_CHILD", "1")
+            .status();
+        match status {
+            Ok(status) => assert!(status.success(), "the private-bus probe failed: {status}"),
+            // 没装 dbus-run-session 时不假装测过。
+            Err(error) => eprintln!("skipping the private-bus probe test: {error}"),
+        }
+    }
+
+    /// 总线不可达时按"有托盘"处理：探测失败不该把能用的托盘关掉。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn tray_host_probe_treats_an_unreachable_bus_as_available() {
+        if std::env::var_os("VRCS_TRAY_PROBE_CHILD").is_some() {
+            assert!(super::tray_host_available());
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::tray_host_probe_treats_an_unreachable_bus_as_available",
+                "--nocapture",
+            ])
+            .env("VRCS_TRAY_PROBE_CHILD", "1")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                "unix:path=/nonexistent-vrcs-probe-bus",
+            )
+            .status()
+            .expect("re-exec the test binary");
+        assert!(
+            status.success(),
+            "the unreachable-bus probe failed: {status}"
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn temp_data_root(label: &str) -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "vrcs-data-dir-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn legacy_hidden_data_directory_is_migrated_into_the_xdg_root() {
+        let root = temp_data_root("migrate");
+        let legacy = root.join(".vrcs");
+        std::fs::create_dir_all(legacy.join("models")).unwrap();
+        std::fs::write(legacy.join("config.json"), "legacy").unwrap();
+
+        let resolved = super::resolve_data_dir(root.clone());
+
+        assert_eq!(resolved, root.join("vrcs"));
+        assert!(!legacy.exists());
+        assert_eq!(
+            std::fs::read_to_string(resolved.join("config.json")).unwrap(),
+            "legacy"
+        );
+        assert!(resolved.join("models").is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn existing_xdg_data_directory_wins_over_the_legacy_one() {
+        let root = temp_data_root("both");
+        let legacy = root.join(".vrcs");
+        let current = root.join("vrcs");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(legacy.join("config.json"), "legacy").unwrap();
+        std::fs::write(current.join("config.json"), "current").unwrap();
+
+        let resolved = super::resolve_data_dir(root.clone());
+
+        assert_eq!(resolved, current);
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("config.json")).unwrap(),
+            "legacy"
+        );
+        assert_eq!(
+            std::fs::read_to_string(resolved.join("config.json")).unwrap(),
+            "current"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn fresh_install_uses_the_xdg_data_directory() {
+        let root = temp_data_root("fresh");
+
+        let resolved = super::resolve_data_dir(root.clone());
+
+        assert_eq!(resolved, root.join("vrcs"));
+        assert!(!resolved.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn failed_migration_keeps_using_the_legacy_data_directory() {
+        let root = temp_data_root("fallback");
+        let legacy = root.join(".vrcs");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("config.json"), "legacy").unwrap();
+        // A target whose parent directory does not exist cannot be renamed onto.
+        let unreachable = root.join("missing").join("vrcs");
+
+        let resolved = super::migrate_legacy_data_dir(&unreachable, &legacy);
+
+        assert_eq!(resolved, legacy);
+        assert_eq!(
+            std::fs::read_to_string(resolved.join("config.json")).unwrap(),
+            "legacy"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

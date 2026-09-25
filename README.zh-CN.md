@@ -50,7 +50,7 @@ VRCS 是面向 VRChat 场景的 Windows 实时字幕与语言学习工具。它�
 
 ### 实时字幕与音频
 
-- Windows WASAPI 系统回环、VRChat 进程专用回环和麦克风捕获
+- 系统回环（Windows WASAPI、Linux PipeWire）、VRChat 进程专用回环和麦克风捕获
 - 系统音频与麦克风双路转写，可分别控制音频源和设备
 - Silero ONNX VAD；模型不可用时自动回退到能量检测
 - 可选 Smart Turn 语义断句，用于可由本地控制结束时机的语音片段
@@ -101,7 +101,7 @@ VRCS 不保存原始音频。字幕历史、会话、学习项目、词典和配
 
 开发环境：
 
-- Windows 10 / 11
+- Windows 10 / 11，或 Linux（参见 [docs/Linux.md](docs/Linux.md)）
 - Node.js 24+
 - Rust stable
 - Visual Studio Build Tools，并安装“使用 C++ 的桌面开发”工作负载

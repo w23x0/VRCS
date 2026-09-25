@@ -2,6 +2,7 @@ import { Check, ChevronRight, Cloud, HardDrive, KeyRound, RefreshCw, ShieldCheck
 import { useTranslation } from "react-i18next";
 
 import type { ApiProfileEditorDraft } from "../../api-profile-draft";
+import { platformContext } from "../../i18n/platform-context";
 import { ApiProfileEditor } from "../../settings/api/ApiProfileEditor";
 import type { useAsrModels } from "../../settings/hooks/useAsrModels";
 import type { SettingsDraftController } from "../../settings/hooks/useSettingsDraft";
@@ -95,7 +96,7 @@ export function RecognitionStep({
 
       {recognitionMode === "cloud" ? (
         <div className="onboarding-config-panel">
-          <div className="onboarding-panel-heading"><KeyRound size={18} /><div><strong>{t("onboarding.recognition.cloudSetup")}</strong><small>{t("settings.apiManagement.securityNotice")}</small></div></div>
+          <div className="onboarding-panel-heading"><KeyRound size={18} /><div><strong>{t("onboarding.recognition.cloudSetup")}</strong><small>{t("settings.apiManagement.securityNotice", { context: platformContext() })}</small></div></div>
           {recognitionProfiles.length > 0 && !apiEditor && (
             <div className="onboarding-profile-select">
               <Select
@@ -130,7 +131,7 @@ export function RecognitionStep({
           )}
           {!apiEditor && recognitionProfiles.length === 0 && (
             <button className="onboarding-empty-action" type="button" disabled={operationBusy || apiProfiles.loading || apiProfiles.providerDefinitions.length === 0} onClick={onAddApiProfile}>
-              <KeyRound size={19} /><span><strong>{t("onboarding.recognition.addApi")}</strong><small>{t("onboarding.recognition.addApiDescription")}</small></span><ChevronRight size={18} />
+              <KeyRound size={19} /><span><strong>{t("onboarding.recognition.addApi")}</strong><small>{t("onboarding.recognition.addApiDescription", { context: platformContext() })}</small></span><ChevronRight size={18} />
             </button>
           )}
           {apiEditor && (

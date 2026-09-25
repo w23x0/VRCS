@@ -57,6 +57,7 @@ export function SystemSettingsSection({
   updater: AppUpdaterState;
 }) {
   const { t } = useTranslation();
+  const trayUnavailable = updater.buildInfo?.trayAvailable === false;
   const [transcriptionStartBehavior, setTranscriptionStartBehavior] = useState(
     readTranscriptionStartBehavior,
   );
@@ -207,9 +208,12 @@ export function SystemSettingsSection({
             <PreferenceToggle
               title={t("settings.system.minimizeToTray")}
               checked={desktopPreferences.minimizeToTray}
-              disabled={!desktopPreferencesReady || desktopSaveState === "saving"}
+              disabled={!desktopPreferencesReady || desktopSaveState === "saving" || trayUnavailable}
               onChange={(enabled) => void onUpdateDesktop("minimizeToTray", enabled)}
             />
+            {trayUnavailable && (
+              <p className="external-api-feedback" role="status">{t("settings.system.minimizeToTrayUnavailable")}</p>
+            )}
           </div>
           <div className="system-onboarding-setting">
             <div>

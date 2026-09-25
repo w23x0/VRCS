@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Copy, Minus, Square, X } from "lucide-react";
 
+import { WindowResizeHandles } from "./WindowResizeHandles";
+
 export function WindowChrome() {
   const { t } = useTranslation();
   const [isMaximized, setIsMaximized] = useState(false);
@@ -53,6 +55,7 @@ export function WindowChrome() {
 
   return (
     <header className="window-chrome" data-tauri-drag-region aria-label={t("window.controls")}>
+      <WindowResizeHandles maximized={isMaximized} />
       <div className="window-drag-region" data-tauri-drag-region />
       <div className="window-actions">
         <button type="button" aria-label={t("window.minimize")} title={t("window.minimizeShort")} onClick={() => void runWindowAction("minimize")}><Minus size={15} strokeWidth={1.8} /></button>

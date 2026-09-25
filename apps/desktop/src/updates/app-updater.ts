@@ -4,6 +4,10 @@ export interface AppBuildInfo {
   version: string;
   variant: "standard" | "cuda";
   updaterAvailable: boolean;
+  /** False when the desktop shell could not create a tray icon (no tray to restore a hidden window from). */
+  trayAvailable: boolean;
+  /** Platform of the desktop shell: "linux", "windows", "macos"; "browser" outside the shell. */
+  platform: string;
 }
 
 export interface AppUpdateMetadata {
@@ -19,7 +23,16 @@ export type UpdateDownloadEvent =
 
 export async function loadAppBuildInfo(): Promise<AppBuildInfo> {
   if (!isTauri()) {
-    return { version: "development", variant: "standard", updaterAvailable: false };
+    // Outside the desktop shell there is no window to hide into a tray, so the
+    // tray-dependent preference stays enabled rather than being disabled by a
+    // capability answer that does not apply to this context.
+    return {
+      version: "development",
+      variant: "standard",
+      updaterAvailable: false,
+      trayAvailable: true,
+      platform: "browser",
+    };
   }
   return invoke<AppBuildInfo>("app_build_info");
 }
