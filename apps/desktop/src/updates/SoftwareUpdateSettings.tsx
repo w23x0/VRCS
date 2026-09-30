@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { PreferenceToggle } from "../settings/SettingsControls";
 import { platformContext } from "../i18n/platform-context";
+import { automaticChecksToggleState } from "./software-update-display";
 import type { AppUpdaterState } from "./useAppUpdater";
 
 function updateStatusKey(updater: AppUpdaterState): string {
@@ -22,9 +23,9 @@ export function SoftwareUpdateSettings({ updater }: { updater: AppUpdaterState }
     || updater.phase === "downloading"
     || updater.phase === "installing";
   const statusKey = updateStatusKey(updater);
-  // 只在构建信息已明确"没有更新器"时锁住开关（Linux 恒为 true）：未知不等于不可用，
-  // 否则每次启动都会在读取构建信息前闪一下灰。
-  const updaterUnavailable = updater.buildInfo?.updaterAvailable === false;
+  // 只在构建信息已明确"没有更新器"时锁住开关并显示为关（Linux 恒为 true）：未知不等于
+  // 不可用，否则每次启动都会在读取构建信息前闪一下灰或闪一下关。只改显示，不改存储的偏好。
+  const automaticChecksToggle = automaticChecksToggleState(updater);
 
   return (
     <section className="system-settings-group software-update-settings" aria-labelledby="software-update-title">
@@ -52,8 +53,8 @@ export function SoftwareUpdateSettings({ updater }: { updater: AppUpdaterState }
       </div>
       <PreferenceToggle
         title={t("updates.automaticChecks")}
-        checked={updater.automaticChecks}
-        disabled={!updater.preferenceReady || updater.preferenceSaving || updaterUnavailable}
+        checked={automaticChecksToggle.checked}
+        disabled={automaticChecksToggle.disabled}
         onChange={(enabled) => void updater.setAutomaticChecks(enabled)}
       />
     </section>
