@@ -1162,7 +1162,7 @@ pub fn translation_language_name(language: &str) -> Option<&'static str> {
         "id" => "Indonesian",
         "it" => "Italian",
         "ms" => "Malay",
-        "nb" => "Norwegian Bokm姘搇",
+        "nb" => "Norwegian Bokmål",
         "nl" => "Dutch",
         "pl" => "Polish",
         "pt-BR" => "Portuguese (Brazil)",
@@ -1370,5 +1370,26 @@ mod tests {
         assert!(is_valid_translation_language("yue-Hant"));
         assert!(!is_valid_translation_language("en-u-ca-gregory"));
         assert!(!is_valid_translation_language("not a language"));
+    }
+
+    #[test]
+    fn translation_language_names_cover_supported_codes_without_mojibake() {
+        for code in LLM_TRANSLATION_LANGUAGES {
+            let name = translation_language_name(code)
+                .unwrap_or_else(|| panic!("missing translation language name for {code}"));
+            assert!(
+                !name.chars().any(
+                    |value| matches!(value, '\u{2E80}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}')
+                ),
+                "translation language name for {code} contains CJK characters: {name}"
+            );
+        }
+
+        for code in DEEPL_TRANSLATION_LANGUAGES {
+            assert!(
+                LLM_TRANSLATION_LANGUAGES.contains(code),
+                "DeepL language {code} is missing from the LLM translation languages"
+            );
+        }
     }
 }
