@@ -1,5 +1,6 @@
 mod app_updates;
 mod diagnostics;
+mod reaper;
 mod vr_overlay;
 
 use std::net::TcpListener;
@@ -121,10 +122,7 @@ fn open_vrcx_repository() -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = std::process::Command::new("xdg-open");
 
-    command
-        .arg(VRCX_REPOSITORY_URL)
-        .spawn()
-        .map(|_| ())
+    reaper::spawn_detached(command.arg(VRCX_REPOSITORY_URL))
         .map_err(|error| format!("Failed to open VRCX-0 repository: {error}"))
 }
 

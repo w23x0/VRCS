@@ -21,7 +21,7 @@ runtime check was possible it was performed (see the evidence line).
 | 7 | all | Translation prompt | The Norwegian target-language label reaches the model as mojibake (`Norwegian Bokm姘搇`) | 1-line string fix plus a table-consistency test |
 | 8 | Linux | Capture, *System default* | The default-mode stream still pins `target.object` to the default at start; whether WirePlumber 0.5 then follows a default change is unverified | `audio/linux/capture.rs` `prepare` |
 | 9 | all | Per-process capture | After VRChat restarts (new pid) the capture keeps waiting on the old pid and stays silent until it is restarted | Both backends |
-| 10 | Linux | Desktop shell | `xdg-open` children (open logs folder, open VRCX-0 page) are never reaped and stay as zombies until VRCS exits | `diagnostics.rs`, `lib.rs` |
+| 10 | Linux | Desktop shell | **Fixed**: launched helper processes are reaped by a background thread | — |
 
 ## 1. VR Overlay gate fails open when the status call fails
 
@@ -161,12 +161,25 @@ runtime check was possible it was performed (see the evidence line).
   running and produces no audio until the user stops and starts it.
 - **Why it was not fixed**: same behaviour on Windows, so it is a product change for both backends.
 
-## 10. `xdg-open` children are not reaped
+## 10. `xdg-open` children are not reaped — fixed
 
 - **Code**: `apps/desktop/src-tauri/src/diagnostics.rs` `open_directory`,
   `apps/desktop/src-tauri/src/lib.rs` `open_vrcx_repository`
-- **What happens**: `Command::spawn` without `wait`; unless something else reaps the child, each
-  click leaves a `<defunct>` process until VRCS exits. Found by reading the code, not observed at
-  runtime. Harmless in practice, but visible in `ps`.
-- **Suggested fix**: reap in a background thread, or use `tauri-plugin-opener`.
+- **Was**: `Command::spawn` without `wait`; unless something else reaps the child, each click left
+  a `<defunct>` process until VRCS exits. Found by reading the code, not observed at runtime.
+  Harmless in practice, but visible in `ps`.
+- **Now**: both call sites go through one helper, `reaper::spawn_detached`
+  (`apps/desktop/src-tauri/src/reaper.rs`), which spawns the command and hands the `Child` to a
+  named background thread (`vrcs-helper-reaper`) that `wait`s on it; a failed `wait` is only
+  logged with `tracing::debug!`. No new dependency — `tauri-plugin-opener` was not needed, and
+  adding it would have been the more Windows-visible change.
+- **Windows**: the helper is shared, because the command construction already was. On Windows this
+  closes the `explorer.exe` handle from a background thread instead of dropping it inline; nothing
+  is read from the child, the exit status was never used, and the UI thread still does not block,
+  so the user-visible behaviour is unchanged.
+- **Verification**: `reaper::tests` (Linux-only) covers both directions —
+  `child_spawned_without_waiting_stays_a_zombie` spawns `true` and drops the `Child`, and polls
+  `/proc/<pid>/stat` until the state is `Z`; `detached_helper_is_reaped` spawns `true` through the
+  helper and polls until the pid is gone from `/proc` entirely. With the reaping thread removed the
+  second test fails with `last state Some('Z')`, so it is not vacuous.
 

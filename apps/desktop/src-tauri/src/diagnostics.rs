@@ -266,10 +266,7 @@ fn open_directory(path: &Path) -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = std::process::Command::new("xdg-open");
 
-    command
-        .arg(path)
-        .spawn()
-        .map(|_| ())
+    crate::reaper::spawn_detached(command.arg(path))
         .map_err(|error| format!("Failed to open log directory: {error}"))
 }
 

@@ -121,7 +121,7 @@
 | 7 | 挪威语目标语言名是乱码 `Norwegian Bokm姘搇`，会进入 LLM 提示词 | 上游 `1aa70f1` 引入，所有平台都受影响。按 D5 只提给上游（U2） |
 | 8 | System default 模式在启动时仍把当前默认节点写进 `target.object` | 在 WirePlumber 0.4.17 上行为正确（会跟随）；在 0.5 上可能被钉死在旧的默认设备上，但我这里没有 0.5，无法验证，不硬改 |
 | 9 | VRChat 重启（pid 变化）后，按进程采集不会跟随新进程，一直静音 | Windows 后端同样按 pid 绑定，属于两端都要改的产品行为。已列为上游草稿 U9 |
-| 10 | `xdg-open` 子进程没有回收（僵尸进程） | 通过读代码发现，没有实际观察到；影响可以忽略 |
+| 10 | `xdg-open` 子进程没有回收（僵尸进程） | **已修复**（见 `docs/KnownIssues.md` #10）：两处 `spawn` 改用共用的 `reaper::spawn_detached`，由具名后台线程 `wait` 回收；Windows 上只是把句柄的关闭挪到后台线程，用户可见行为不变。`reaper::tests` 里有一个对照测试直接观察到 `Z` 状态，修复前 `detached_helper_is_reaped` 会失败 |
 
 ### 4.1 其他观察（没有列入 KnownIssues）
 
