@@ -6,7 +6,7 @@ Both entry points work on Linux: the Tauri desktop shell (packaged as `.deb` and
 
 ## Build prerequisites
 
-Verified on Ubuntu 26.04 (x64) with PipeWire 1.6.2 and WirePlumber, and on Ubuntu 24.04 (x64) with PipeWire 1.0.5 and WirePlumber 0.4.17 (build, both crates' tests, frontend tests, `.deb`/`.AppImage` bundles). The capture backend is built against the `pipewire` crate's `v0_3_65` API level; older PipeWire releases have not been tested.
+Verified on Ubuntu 26.04 (x64) with PipeWire 1.6.2 and WirePlumber 1.6.2, and on Ubuntu 24.04 (x64) with PipeWire 1.0.5 and WirePlumber 0.4.17 (build, both crates' tests, frontend tests, `.deb`/`.AppImage` bundles). The default-device semantics below were re-checked on PipeWire 1.6.2 with WirePlumber 1.6.2. The capture backend is built against the `pipewire` crate's `v0_3_65` API level; older PipeWire releases have not been tested.
 
 - Rust stable
 - Node.js 24+ (frontend only)
@@ -121,7 +121,7 @@ The bundles are not signed and do not include updater artifacts, so they are for
 - Sample rate comes from the PipeWire graph rate (`clock.rate` in the `settings` metadata, with `default.clock.rate` accepted as a legacy fallback); the channel count of a device is its node's `audio.channels`, and the default device is determined from the `default` metadata.
 - Per-process capture taps the target application's audio output streams; see below. If the tap cannot be created the capture reports `audio.process_loopback_unavailable` instead of silently falling back to whole-system audio.
 - Device endpoints are PipeWire `node.name` values, not WASAPI endpoint ids, so an audio configuration copied from Windows does not carry over.
-- A device chosen explicitly stays chosen, as with WASAPI: the stream carries `node.dont-reconnect`, so the session manager neither moves it to a new default device nor falls back to another device when it disappears. If the selected device goes away the capture stops with an error instead of silently recording something else. **System default** follows the default device when it changes (verified with WirePlumber 0.4.17; see issue 8 in [Known issues](KnownIssues.md) for WirePlumber 0.5).
+- A device chosen explicitly stays chosen, as with WASAPI: the stream carries `node.dont-reconnect`, so the session manager neither moves it to a new default device nor falls back to another device when it disappears. If the selected device goes away the capture stops with an error instead of silently recording something else. **System default** follows the default device when it changes (verified with WirePlumber 0.4.17 and 1.6.2: the default-mode stream does carry `target.object`, but the session manager moves it to the new default anyway — for sinks and for microphones, in both directions). See issue 8 in [Known issues](KnownIssues.md) for the evidence and for a manual re-verification recipe.
 
 ### Per-process capture
 
