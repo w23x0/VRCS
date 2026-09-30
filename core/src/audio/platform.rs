@@ -10,6 +10,11 @@ pub(crate) enum CaptureTarget {
 }
 
 impl CaptureTarget {
+    /// 按进程采集：本占位实现不支持采集，进程名与 pid 都不使用（与既有占位函数同样处理）。
+    pub(crate) fn process(pid: u32, _name: &str) -> Self {
+        Self::Process(pid)
+    }
+
     /// 各平台统一的构造入口：`endpoint` 是后端自己的设备标识。
     pub(crate) fn device(endpoint: Option<String>, direction: DeviceDirection) -> Self {
         Self::Device {

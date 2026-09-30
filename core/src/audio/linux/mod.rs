@@ -3,9 +3,10 @@
 //! 与 `audio/wasapi/` 的语义保持一致：
 //! - `DeviceDirection::Render`（系统音频）→ 录制某个 sink 的 monitor 端口；
 //! - `DeviceDirection::Capture`（麦克风）→ 录制某个 source 节点；
-//! - `CaptureTarget::Process`（按进程隔离采集）→ 不自动接线，而是把目标进程音频
+//! - `CaptureTarget::Process`（按进程隔离采集，携带 pid 与进程名）→ 不自动接线，而是把目标进程音频
 //!   输出流的端口手动接到本流的输入端口（tap），只录该进程的声音；它不改变目标
-//!   进程的路由，因此停止时也不需要恢复任何东西。
+//!   进程的路由，因此停止时也不需要恢复任何东西。目标进程退出并重启后（pid 变了）
+//!   会按进程名重新解析并把 tap 切到新进程，采集不需要重启。
 
 mod capture;
 mod devices;
@@ -22,7 +23,8 @@ use super::{AudioDevice, AudioError, CaptureSource};
 /// 采集目标。`endpoint` 是 PipeWire 的 `node.name`，`None` 表示跟随系统默认设备。
 #[derive(Clone)]
 pub(crate) enum CaptureTarget {
-    Process(u32),
+    /// `name` 是进程名（`VRChat.exe` 之类）：采集期间目标进程重启后按它重新解析 pid。
+    Process { pid: u32, name: String },
     Device {
         endpoint: Option<String>,
         direction: DeviceDirection,
@@ -30,6 +32,14 @@ pub(crate) enum CaptureTarget {
 }
 
 impl CaptureTarget {
+    /// 按进程采集：同时带上 pid 与进程名，供目标进程重启后重新解析。
+    pub(crate) fn process(pid: u32, name: &str) -> Self {
+        Self::Process {
+            pid,
+            name: name.to_string(),
+        }
+    }
+
     /// 各平台统一的构造入口：`endpoint` 是后端自己的设备标识。
     pub(crate) fn device(endpoint: Option<String>, direction: DeviceDirection) -> Self {
         Self::Device {
@@ -91,6 +101,13 @@ mod tests {
     /// 干扰用频率：与 TONE_HZ 相隔足够远，便于用 DFT 幅度区分。
     const OTHER_TONE_HZ: f32 = 220.0;
     const TONE_AMPLITUDE: f32 = 0.4;
+    /// 跟随测试专用 sink：测试并行跑，共用一个 sink 会互相污染。
+    const FOLLOW_SINK_NAME: &str = "vrcs-follow-test";
+    const FOLLOW_SINK_LABEL: &str = "VRCS follow test sink";
+    /// 直接驱动采集线程的测试用假进程名：永远查不到替代进程，采集就停在传入的 pid 上。
+    const FOLLOW_TARGET_NAME_SENTINEL: &str = "vrcs-capture-test-no-such-process";
+    /// 跟随新进程的最长时间：重新解析本身有 1 秒的节流，留足余量。
+    const FOLLOW_TIMEOUT: Duration = Duration::from_secs(20);
 
     /// 采集通路需要真实的 PipeWire 会话；没有会话时跳过（CI 上的默认行为）。
     fn connect_or_skip() -> Option<Session> {
@@ -239,6 +256,198 @@ mod tests {
         }
     }
 
+    /// `pw-cat` 在 `PATH` 里的绝对路径：跟随测试要给播放器改名，改名后的链接要指向真身。
+    fn pw_cat_path() -> Option<std::path::PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|directory| directory.join("pw-cat"))
+            .find(|candidate| candidate.is_file())
+    }
+
+    /// 启动一个"进程名像 VRChat"的播放器。
+    ///
+    /// `pw-cat` 是 `pw-play`/`pw-record` 的别名，按 `argv[0]` 决定工作模式：改过名的
+    /// 副本必须显式写 `--playback`，否则它会把 WAV 当裸 PCM 放，频率整体偏掉
+    /// （评审报告 4.2 记的就是这个坑）。
+    fn spawn_named_player(
+        binary: &std::path::Path,
+        target: &str,
+        wav: &std::path::Path,
+    ) -> Option<PlayerGuard> {
+        Command::new(binary)
+            .arg("--playback")
+            .arg("--target")
+            .arg(target)
+            .arg("--properties")
+            .arg("{ node.dont-reconnect = true }")
+            .arg(wav)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
+            .map(PlayerGuard::new)
+    }
+
+    /// 跟随测试的目标进程名。
+    ///
+    /// 刻意不用真的 `VRChat.exe`：一是开发者本机常开着真 VRChat，`find_process_id` 会
+    /// 精确命中它并把采集真的接到用户自己的 VRChat 输出流上；二是残留的同名进程会被
+    /// `find_process_id` 按"先枚举到的胜出"选走，污染下一次运行（现在残留也清不掉了，见
+    /// `PlayerGuard`）。名字带本次测试的进程号，因此每次运行都唯一。
+    ///
+    /// `/proc/<pid>/comm` 被内核截断到 15 个字符，所以这个名字必须留够余量：前缀 6 个
+    /// 字符 + 至多 7 位 pid（`pid_max` 上限 2^22）= 13 字符。
+    fn follow_target_name() -> String {
+        format!("vrcsft{}", std::process::id())
+    }
+
+    /// 播放器守卫：作用域退出时按 pid 结束并回收子进程。
+    ///
+    /// 只按 pid 结束自己启动的进程，绝不按名字杀。裸 `Child` 把清理留在函数末尾的话，
+    /// 任何一条断言 panic 都会把还在播音的 `pw-cat` 留在系统里；同分时 `find_process_id`
+    /// 取先枚举到的那个（残留的 pid 更小，通常先到），于是下一次运行会在第一条断言上
+    /// 就被上一次的残留打挂。
+    struct PlayerGuard(Option<Child>);
+
+    impl PlayerGuard {
+        fn new(child: Child) -> Self {
+            Self(Some(child))
+        }
+
+        fn id(&self) -> u32 {
+            self.0.as_ref().expect("player is live").id()
+        }
+
+        /// 主动结束并回收（模拟 VRChat 退出），之后 `Drop` 不会再碰它。
+        fn stop(&mut self) {
+            kill(self.0.take());
+        }
+    }
+
+    impl Drop for PlayerGuard {
+        fn drop(&mut self) {
+            kill(self.0.take());
+        }
+    }
+
+    /// 连续读 `seconds` 秒的采集数据；两秒内没有任何分块就提前返回（采集静音或已停止）。
+    fn collect_for(capture: &mut AudioCapture, seconds: f32) -> Vec<f32> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("tokio runtime");
+        runtime.block_on(async {
+            let deadline = Instant::now() + Duration::from_secs_f32(seconds);
+            let mut frames = Vec::new();
+            while Instant::now() < deadline {
+                match tokio::time::timeout(Duration::from_secs(2), capture.read()).await {
+                    Ok(Ok(chunk)) => {
+                        assert_eq!(chunk.len(), CHUNK_FRAMES);
+                        frames.extend_from_slice(&chunk);
+                    }
+                    Ok(Err(error)) => panic!("process capture failed: {error}"),
+                    Err(_) => break,
+                }
+            }
+            frames
+        })
+    }
+
+    /// VRChat 重启（pid 变了）后，按进程采集要自己跟到新进程上，用户不必重启采集。
+    #[test]
+    fn process_capture_follows_a_restarted_process() {
+        let Some(session) = connect_or_skip() else {
+            return;
+        };
+        let Some(pw_cat) = pw_cat_path() else {
+            eprintln!("skipping PipeWire follow test: pw-cat is not installed");
+            return;
+        };
+        let Some(sink) = create_test_sink(&session, FOLLOW_SINK_NAME, FOLLOW_SINK_LABEL) else {
+            eprintln!("skipping PipeWire follow test: could not create a null sink");
+            return;
+        };
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        // 改名后 `comm` 与 `argv[0]` 的文件名都变成这个唯一名字，`find_process_id` 才能匹配上。
+        let target_name = follow_target_name();
+        let binary = directory.path().join(&target_name);
+        std::os::unix::fs::symlink(&pw_cat, &binary)
+            .expect("link pw-cat under the target process name");
+        let first_tone = directory.path().join("first440.wav");
+        let second_tone = directory.path().join("second220.wav");
+        write_tone(&first_tone, 30.0, TONE_HZ).expect("write 440 Hz tone");
+        write_tone(&second_tone, 30.0, OTHER_TONE_HZ).expect("write 220 Hz tone");
+
+        let mut first_player =
+            spawn_named_player(&binary, FOLLOW_SINK_NAME, &first_tone).expect("first player");
+        let first_pid = first_player.id();
+        assert_eq!(
+            find_process_id(&target_name).expect("lookup"),
+            Some(first_pid),
+            "the renamed player must be found by its process name"
+        );
+
+        let mut capture = AudioCapture::new(TEST_RATE, CaptureSource::Speaker);
+        let device = capture
+            .start(None, Some(&target_name))
+            .expect("process capture should start");
+        assert_eq!(device.name, "Application audio");
+        assert!(device.is_loopback);
+
+        let before = collect_for(&mut capture, 3.0);
+        let before_440 = tone_magnitude(&before, TONE_HZ, TEST_RATE);
+        let before_220 = tone_magnitude(&before, OTHER_TONE_HZ, TEST_RATE);
+        assert!(
+            before_440 > 0.05,
+            "the first player's 440 Hz tone is missing: {before_440}"
+        );
+        assert!(
+            before_440 > 5.0 * before_220,
+            "capture is not isolated to the target process: 440 Hz {before_440}, 220 Hz {before_220}"
+        );
+
+        // 只按 pid 结束旧进程（绝不按名字杀），模拟 VRChat 退出。
+        first_player.stop();
+
+        // 同名的新进程播另一个频率：采集不重启，应当在限定时间内跟过去。
+        let mut second_player =
+            spawn_named_player(&binary, FOLLOW_SINK_NAME, &second_tone).expect("second player");
+        let second_pid = second_player.id();
+
+        // 一秒一秒地读，直到新进程的音调出现，顺便记下切换花了多久。
+        let restarted_at = Instant::now();
+        let mut after = Vec::new();
+        loop {
+            let slice = collect_for(&mut capture, 1.0);
+            after.extend_from_slice(&slice);
+            if tone_magnitude(&after, OTHER_TONE_HZ, TEST_RATE) > 0.05 {
+                break;
+            }
+            assert!(
+                restarted_at.elapsed() < FOLLOW_TIMEOUT,
+                "the capture did not follow the restarted process (pid {first_pid} -> {second_pid}): \
+                 the new 220 Hz tone never arrived, only {} frames were captured",
+                after.len()
+            );
+        }
+        eprintln!(
+            "follow test: pid {first_pid} -> {second_pid}, followed after {:?}",
+            restarted_at.elapsed()
+        );
+
+        second_player.stop();
+        capture.stop();
+        let _ = session.core.destroy_object(sink);
+
+        let after_220 = tone_magnitude(&after, OTHER_TONE_HZ, TEST_RATE);
+        let after_440 = tone_magnitude(&after, TONE_HZ, TEST_RATE);
+        assert!(
+            after_220 > 5.0 * after_440,
+            "the capture still holds the old process's audio: 220 Hz {after_220}, 440 Hz {after_440}"
+        );
+    }
+
     #[test]
     fn captures_a_sink_monitor_as_mono_chunks_at_the_requested_rate() {
         let Some(session) = connect_or_skip() else {
@@ -354,6 +563,9 @@ mod tests {
     }
 
     /// 直接驱动采集线程（用精确 pid，绕开按名字查找），持续 `seconds` 秒后停止。
+    ///
+    /// 进程名给一个不存在的名字：跟随逻辑永远查不到替代进程，因此采集一直停在传入的
+    /// 那个精确 pid 上（真实产品里"没找到新进程"也正是这个行为）。
     fn capture_process_for(session: &Session, pid: u32, seconds: f32) -> Vec<f32> {
         use std::sync::atomic::Ordering;
 
@@ -363,7 +575,7 @@ mod tests {
         let thread_stop = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
             capture_main(
-                CaptureTarget::Process(pid),
+                CaptureTarget::process(pid, FOLLOW_TARGET_NAME_SENTINEL),
                 TEST_RATE,
                 thread_stop,
                 tx,

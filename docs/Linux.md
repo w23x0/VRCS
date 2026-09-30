@@ -156,6 +156,11 @@ Details and current limits:
   effectively identical on both channels).
 - New output streams are picked up within a quarter second, and a tap is re-created if its link
   disappears, so restarting the application's audio does not require restarting capture.
+- When the application itself restarts (VRChat exiting and starting again gets a new pid), the
+  capture notices within a second or so that the pid is gone — or has been reused by something
+  else — resolves the process name again and moves the tap to the new process. The level meter
+  stays quiet while no new process exists; capture neither stops with an error nor falls back to
+  whole-system audio. See issue 9 in [Known issues](KnownIssues.md).
 - Capture starts even when the application is not playing anything yet; the level meter simply stays quiet.
 - The desktop UI offers this for VRChat only: the process name (`VRChat.exe`) is fixed in the core, so other applications are not selectable yet.
 

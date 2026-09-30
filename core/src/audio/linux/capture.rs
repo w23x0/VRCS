@@ -37,6 +37,9 @@ const MAX_FORMAT_ATTEMPTS: u32 = 3;
 /// 按进程采集时的图刷新间隔：每个刷新 tick 只读一次图快照，既在里面找我们自己的
 /// 输入端口，也用它算出要 tap 的目标流，因此快照频率与扫描频率是同一个节奏。
 const TAP_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+/// 目标进程消失后重新按名字解析 pid 的最短间隔：整棵 `/proc` 的扫描比读单个
+/// `/proc/<pid>/comm` 贵得多，没必要每 250ms 就来一次。
+const PROCESS_LOOKUP_INTERVAL: Duration = Duration::from_secs(1);
 /// 按进程采集时上报的合成设备 id：不占用 0（"跟随系统默认"）也不与真实设备哈希冲突。
 const APPLICATION_DEVICE_ID: i64 = -1;
 const APPLICATION_DEVICE_LABEL: &str = "Application audio";
@@ -82,7 +85,48 @@ enum CapturePlan {
     },
     Process {
         pid: u32,
+        name: String,
     },
+}
+
+/// 按进程采集的当前目标：pid、进程名，以及上次按名字查找的时间。
+///
+/// VRChat 退出并重启后 pid 一定会变，旧 pid 名下的输出流节点连同它们的 tap 一起消失，
+/// 采集于是"还在跑但永远静音"，只能手动停掉再开始。这里在旧进程消失（目录不在了，
+/// 或 pid 被别的进程复用）之后按进程名重新解析，找到新进程就把 tap 切过去；旧进程还
+/// 活着时什么都不做，行为与此前完全一致。重新解析按 `PROCESS_LOOKUP_INTERVAL` 节流。
+struct ProcessFollow {
+    pid: u32,
+    name: String,
+    last_lookup: Instant,
+}
+
+impl ProcessFollow {
+    fn new(pid: u32, name: String, now: Instant) -> Self {
+        Self {
+            pid,
+            name,
+            last_lookup: now,
+        }
+    }
+
+    /// 这一拍是否该重新按名字解析：目标进程已经不在，且距上次解析已过节流窗口。
+    /// 进程还在时恒为 `false`，也就是说"旧进程还活着"的行为一个字都不变。
+    fn relookup_due(&self, alive: bool, now: Instant) -> bool {
+        !alive && now.saturating_duration_since(self.last_lookup) >= PROCESS_LOOKUP_INTERVAL
+    }
+
+    /// 一次解析尝试之后重新计时：没找到新进程时也是，否则空转期间每 250ms 就扫一遍
+    /// `/proc`。
+    fn record_attempt(&mut self, now: Instant) {
+        self.last_lookup = now;
+    }
+
+    /// 切到重启后的新进程。
+    fn adopt(&mut self, pid: u32, now: Instant) {
+        self.pid = pid;
+        self.record_attempt(now);
+    }
 }
 
 /// 建流所需的一切。
@@ -90,7 +134,8 @@ struct Prepared {
     device: AudioDevice,
     props: PropertiesBox,
     autoconnect: bool,
-    tap_pid: Option<u32>,
+    /// 按进程采集时的目标（设备路径为 `None`）。
+    tap: Option<ProcessFollow>,
 }
 
 /// 采集回调的共享可变状态；所有回调都在同一个主循环线程上，无需加锁。
@@ -113,7 +158,7 @@ pub(crate) fn run(
 ) {
     let ready = ReadySignal::new(ready);
     let plan = match target {
-        CaptureTarget::Process(pid) => CapturePlan::Process { pid },
+        CaptureTarget::Process { pid, name } => CapturePlan::Process { pid, name },
         CaptureTarget::Device {
             endpoint,
             direction,
@@ -161,10 +206,10 @@ fn prepare(plan: &CapturePlan, rate: u32) -> Result<Prepared, AudioError> {
                 device,
                 props,
                 autoconnect: true,
-                tap_pid: None,
+                tap: None,
             })
         }
-        CapturePlan::Process { pid } => Ok(Prepared {
+        CapturePlan::Process { pid, name } => Ok(Prepared {
             device: AudioDevice {
                 id: APPLICATION_DEVICE_ID,
                 name: APPLICATION_DEVICE_LABEL.to_string(),
@@ -175,7 +220,7 @@ fn prepare(plan: &CapturePlan, rate: u32) -> Result<Prepared, AudioError> {
             },
             props: base_props(),
             autoconnect: false,
-            tap_pid: Some(*pid),
+            tap: Some(ProcessFollow::new(*pid, name.clone(), Instant::now())),
         }),
     }
 }
@@ -191,7 +236,7 @@ fn capture(
         device,
         props,
         autoconnect,
-        tap_pid,
+        mut tap,
     } = prepare(plan, rate)?;
     let session = Session::connect()?;
 
@@ -351,7 +396,7 @@ fn capture(
             return Err(error);
         }
 
-        if let Some(pid) = tap_pid {
+        if let Some(follow) = tap.as_mut() {
             // 节点 id 是 client 本地缓存（server 绑定后才会被填上），这里读它不产生任何
             // 往返；先等它有效，才有端口可查、可接。
             if own_node.is_none() {
@@ -366,15 +411,26 @@ fn capture(
                 if own_input.is_none() {
                     own_input = own_node.and_then(|node| input_port_of(&snapshot, node));
                 }
+                follow_target_process(follow);
                 // 先把自己的输入端口接上目标进程的输出流，再激活（`set_active`）。
+                // 目标换了 pid 时这一步接的是新进程的流，旧流已经随进程退出从图里消失，
+                // 它们留在 `taps` 里的链路代理也会在 `tap_target_streams` 的 retain 里
+                // 被丢掉（丢弃代理即断开）。
                 if let (Some(node), Some(destination)) = (own_node, own_input) {
-                    tap_target_streams(&session, &snapshot, pid, node, destination, &mut taps)?;
+                    tap_target_streams(
+                        &session,
+                        &snapshot,
+                        follow.pid,
+                        node,
+                        destination,
+                        &mut taps,
+                    )?;
                 }
                 last_refresh = Instant::now();
             }
         }
 
-        if !activated && startup_ready(tap_pid, &startup, own_input) {
+        if !activated && startup_ready(tap.is_some(), &startup, own_input) {
             stream
                 .set_active(true)
                 .map_err(|error| session::call_failed("stream activation", &error))?;
@@ -400,11 +456,60 @@ fn capture(
 }
 
 /// 设备路径沿用"流已暂停且格式约定完成"；按进程采集只要端口就绪即可（此时可能还没有对端）。
-fn startup_ready(tap_pid: Option<u32>, startup: &Startup, own_input: Option<u32>) -> bool {
-    if tap_pid.is_some() {
+fn startup_ready(is_process_capture: bool, startup: &Startup, own_input: Option<u32>) -> bool {
+    if is_process_capture {
         return own_input.is_some();
     }
     startup.paused.get() && startup.format_accepted.get()
+}
+
+/// 目标进程消失后按名字重新解析 pid，把采集切到重启后的新进程。
+fn follow_target_process(follow: &mut ProcessFollow) {
+    follow_target_process_looking_up(follow, devices::find_process_id);
+}
+
+/// `follow_target_process` 本身，查找方式由调用方注入。
+///
+/// 注入是为了让"没跟着切"的两条分支在单元测试里也能覆盖：`Ok(None)`（目标暂时消失，
+/// 安静等着）与 `Err`（扫描 `/proc` 失败）都必须保持当前目标、只重新计时，既不报错
+/// 退出，也不回退到整机音频——用户的意图是"只录 VRChat"，回退会把这个意图悄悄换掉。
+///
+/// 旧进程还活着时 `relookup_due` 为 `false`，直接返回，行为与此前完全一致。
+fn follow_target_process_looking_up(
+    follow: &mut ProcessFollow,
+    lookup: impl FnOnce(&str) -> Result<Option<u32>, AudioError>,
+) {
+    let now = Instant::now();
+    let alive = devices::process_id_is_current(&follow.name, follow.pid);
+    if !follow.relookup_due(alive, now) {
+        return;
+    }
+    match lookup(&follow.name) {
+        // 解析到的还是原 pid（查找期间进程自己又活过来了，或只是链接抖动）时无需切换，
+        // 只把节流窗口重新计时。
+        Ok(Some(pid)) if pid == follow.pid => follow.record_attempt(now),
+        Ok(Some(pid)) => {
+            tracing::info!(
+                selection = "process",
+                process = %follow.name,
+                previous_pid = follow.pid,
+                pid,
+                "following the restarted process"
+            );
+            follow.adopt(pid, now);
+        }
+        Ok(None) => follow.record_attempt(now),
+        // 扫描 `/proc` 失败：保持当前目标，下个节流窗口再试，不中断采集。
+        Err(error) => {
+            tracing::warn!(
+                process = %follow.name,
+                code = error.code(),
+                detail = %error,
+                "failed to look the captured process up again"
+            );
+            follow.record_attempt(now);
+        }
+    }
 }
 
 /// 流节点 id 在 server 绑定前是无效值（0 / SPA_ID_INVALID）。
@@ -568,7 +673,13 @@ fn capture_frames(stream: &Stream, state: &mut CaptureState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_mono, usable_chunk, ChunkFlags};
+    use std::time::{Duration, Instant};
+
+    use super::{
+        append_mono, follow_target_process_looking_up, usable_chunk, ChunkFlags, ProcessFollow,
+        PROCESS_LOOKUP_INTERVAL,
+    };
+    use crate::audio::AudioError;
 
     /// 一帧多声道 F32LE 样本的字节序列。
     fn frame(samples: &[f32]) -> Vec<u8> {
@@ -631,5 +742,120 @@ mod tests {
         assert!(!usable_chunk(0, ChunkFlags::empty()));
         assert!(!usable_chunk(1024, ChunkFlags::CORRUPTED));
         assert!(usable_chunk(1024, ChunkFlags::empty()));
+    }
+
+    fn follow(pid: u32, start: Instant) -> ProcessFollow {
+        ProcessFollow::new(pid, "VRChat.exe".to_string(), start)
+    }
+
+    /// 旧进程还活着时，一个 pid 都不重新解析：这一路径的行为与加入跟随之前完全一致。
+    #[test]
+    fn a_live_target_is_never_looked_up_again() {
+        let start = Instant::now();
+        let target = follow(100, start);
+        for seconds in [0, 1, 60, 3_600] {
+            assert!(
+                !target.relookup_due(true, start + Duration::from_secs(seconds)),
+                "a live process must not be looked up again"
+            );
+        }
+        assert_eq!(target.pid, 100);
+    }
+
+    /// 旧进程消失后按节流窗口重新解析：没找到就继续安静等待，找到就切到新 pid。
+    #[test]
+    fn a_missing_target_is_relooked_up_throttled_and_adopts_a_new_pid() {
+        let start = Instant::now();
+        let mut target = follow(100, start);
+        let due = start + PROCESS_LOOKUP_INTERVAL;
+
+        // 节流窗口内不扫 `/proc`（每拍只读一次 `/proc/<pid>/comm`，不扫整棵树）。
+        assert!(!target.relookup_due(false, start));
+        assert!(!target.relookup_due(false, due - Duration::from_millis(1)));
+        assert!(target.relookup_due(false, due));
+
+        // 没找到新进程：pid 不变，但必须重新计时，否则空转时每 250ms 就扫一遍 `/proc`。
+        target.record_attempt(due);
+        assert_eq!(target.pid, 100);
+        assert!(!target.relookup_due(false, due + Duration::from_millis(250)));
+        assert!(target.relookup_due(false, due + PROCESS_LOOKUP_INTERVAL));
+
+        // 找到新进程：切过去，并从这一刻重新计时。
+        target.adopt(250, due + PROCESS_LOOKUP_INTERVAL);
+        assert_eq!(target.pid, 250);
+        assert!(!target.relookup_due(
+            true,
+            due + PROCESS_LOOKUP_INTERVAL + Duration::from_secs(3_600)
+        ));
+    }
+
+    /// 目标名取一个必然不存在的哨兵：`process_id_is_current` 于是恒为 `false`（"目标已
+    /// 消失"正是要跟随的场景），注入的查找结果是唯一的变量。
+    const MISSING_PROCESS: &str = "vrcs-follow-test-no-such-process";
+
+    /// 一个已经消失、且早过节流窗口的目标：进入 `follow_target_process_looking_up` 后
+    /// 一定会走到查找那一步。
+    fn missing_target() -> ProcessFollow {
+        ProcessFollow::new(
+            100,
+            MISSING_PROCESS.to_string(),
+            Instant::now() - PROCESS_LOOKUP_INTERVAL - Duration::from_secs(1),
+        )
+    }
+
+    /// 没跟着切目标时应有的样子：pid 不动，且节流窗口已经重新计时。
+    fn kept_and_rethrottled(target: &ProcessFollow) {
+        assert_eq!(target.pid, 100, "the target must be kept");
+        assert!(
+            !target.relookup_due(false, Instant::now() + Duration::from_millis(250)),
+            "the throttle window was not restarted"
+        );
+    }
+
+    /// 目标还没重启起来（`Ok(None)`）或 `/proc` 扫不出来（`Err`）时，采集必须安静等着：
+    /// 目标 pid 不动、节流窗口重新计时，既不切走也不中断。
+    ///
+    /// `looked_up` 这个断言是必要的：极少数没挂 procfs 的系统上 `process_id_is_current`
+    /// 恒为 `true`，函数会在注入的查找之前就提前返回，没有它这两条分支就成了恒真。
+    #[test]
+    fn follow_target_process_keeps_the_target_when_the_lookup_yields_nothing() {
+        // 目标暂时消失：一个也解析不到。
+        let mut target = missing_target();
+        let mut looked_up = false;
+        follow_target_process_looking_up(&mut target, |name| {
+            looked_up = true;
+            assert_eq!(name, MISSING_PROCESS);
+            Ok(None)
+        });
+        assert!(looked_up, "the lookup never ran");
+        kept_and_rethrottled(&target);
+
+        // 扫描 `/proc` 失败：行为同上，只是额外记一条 warn 之后继续等。
+        let mut target = missing_target();
+        let mut looked_up = false;
+        follow_target_process_looking_up(&mut target, |_| {
+            looked_up = true;
+            Err(AudioError::with_code(
+                "audio.unavailable",
+                "Failed to enumerate processes",
+            ))
+        });
+        assert!(looked_up, "the lookup never ran");
+        kept_and_rethrottled(&target);
+    }
+
+    /// 解析到了新 pid 时确实切过去，切过去之后目标又"活着"了，不再重新解析。
+    #[test]
+    fn follow_target_process_adopts_a_new_pid() {
+        let mut target = missing_target();
+        let mut looked_up = false;
+        follow_target_process_looking_up(&mut target, |_| {
+            looked_up = true;
+            Ok(Some(250))
+        });
+
+        assert!(looked_up, "the lookup never ran");
+        assert_eq!(target.pid, 250);
+        assert!(!target.relookup_due(true, Instant::now() + Duration::from_secs(3_600)));
     }
 }

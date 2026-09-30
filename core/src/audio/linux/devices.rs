@@ -212,7 +212,7 @@ pub(crate) fn find_process_id(name: &str) -> Result<Option<u32>, AudioError> {
 /// （例如 `vrchat-helper`），所以这里扫描完整棵树、按匹配质量取名次最优的那个，
 /// 而不是返回第一个命中项；名次相同的候选保留先遇到的那个。
 fn find_process_id_in(root: &Path, name: &str) -> Result<Option<u32>, AudioError> {
-    let needle = name.trim().trim_end_matches(".exe").to_ascii_lowercase();
+    let needle = normalize_needle(name);
     if needle.is_empty() {
         return Ok(None);
     }
@@ -235,11 +235,8 @@ fn find_process_id_in(root: &Path, name: &str) -> Result<Option<u32>, AudioError
         if matches!(best, Some((1, _))) {
             break;
         }
-        let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
-        // `comm` 被内核截断到 15 个字符，带路径启动或名字较长的进程只能靠 `cmdline` 匹配。
-        let cmdline = std::fs::read_to_string(entry.path().join("cmdline")).unwrap_or_default();
-        let executable = cmdline.split('\0').next().unwrap_or_default();
-        let Some(rank) = process_rank(&comm, executable, &needle) else {
+        let (comm, executable) = read_process_names(&entry.path());
+        let Some(rank) = process_rank(&comm, &executable, &needle) else {
             continue;
         };
         if best.is_none_or(|(best_rank, _)| rank < best_rank) {
@@ -247,6 +244,42 @@ fn find_process_id_in(root: &Path, name: &str) -> Result<Option<u32>, AudioError
         }
     }
     Ok(best.map(|(_, pid)| pid))
+}
+
+/// `pid` 是否仍是名字匹配的那个进程：按进程采集期间用它判断目标还在不在。
+///
+/// 两种情况都算"不在"：`/proc/<pid>` 已经消失（进程退出），或者那个 pid 被别的进程
+/// 复用了（此时 `comm`/`cmdline` 不再匹配）。
+pub(crate) fn process_id_is_current(name: &str, pid: u32) -> bool {
+    let root = Path::new("/proc");
+    // 极少数没挂 procfs 的系统上无法判断，按旧行为处理：不跟随，也不报错。
+    !root.is_dir() || process_id_is_current_in(root, name, pid)
+}
+
+/// 在给定的 procfs 根目录下判断 `pid` 是否仍是名字匹配的进程。
+fn process_id_is_current_in(root: &Path, name: &str, pid: u32) -> bool {
+    let needle = normalize_needle(name);
+    if needle.is_empty() {
+        return false;
+    }
+    let (comm, executable) = read_process_names(&root.join(pid.to_string()));
+    // 进程已经退出（目录还在但内容读空，或目录整个消失）时 comm/executable 都为空，
+    // 匹配必然失败，因此这里不需要单独判断"目录是否存在"。
+    process_rank(&comm, &executable, &needle).is_some()
+}
+
+/// 进程名的匹配键：去掉 `.exe` 后缀并转成小写（`find_process_id` 与存活判定共用）。
+fn normalize_needle(name: &str) -> String {
+    name.trim().trim_end_matches(".exe").to_ascii_lowercase()
+}
+
+/// 读一个 procfs 目录下的 `comm` 与 `cmdline`（argv[0]）；读不到就当作空字符串。
+fn read_process_names(dir: &Path) -> (String, String) {
+    let comm = std::fs::read_to_string(dir.join("comm")).unwrap_or_default();
+    // `comm` 被内核截断到 15 个字符，带路径启动或名字较长的进程只能靠 `cmdline` 匹配。
+    let cmdline = std::fs::read_to_string(dir.join("cmdline")).unwrap_or_default();
+    let executable = cmdline.split('\0').next().unwrap_or_default().to_string();
+    (comm, executable)
 }
 
 /// 进程名匹配质量的名次，1 最好、4 最差；`None` 表示不匹配。
@@ -478,6 +511,54 @@ mod tests {
         assert_eq!(
             find_process_id_in(&root, "vrcs_core-long-name").expect("lookup"),
             Some(7)
+        );
+    }
+
+    #[test]
+    fn the_captured_process_is_tracked_until_it_exits_or_gets_reused() {
+        let root = scratch_root("liveness");
+        fake_process(&root, 100, "VRChat.exe", "/opt/VRChat.exe");
+        // 进程还在：pid 有效，按进程采集什么都不用做。
+        assert!(process_id_is_current_in(&root, "VRChat.exe", 100));
+
+        // 进程退出：`/proc/<pid>` 整个没了。
+        std::fs::remove_dir_all(root.join("100")).expect("remove process dir");
+        assert!(!process_id_is_current_in(&root, "VRChat.exe", 100));
+
+        // pid 被别的进程复用：目录在，但已经换成了另一个程序。
+        fake_process(&root, 100, "firefox", "/usr/lib/firefox/firefox");
+        assert!(!process_id_is_current_in(&root, "VRChat.exe", 100));
+        // 同名进程恰好复用回这个 pid（重启后 pid 没变）也算当前进程。
+        fake_process(&root, 100, "VRChat.exe", "/opt/VRChat.exe");
+        assert!(process_id_is_current_in(&root, "VRChat.exe", 100));
+
+        // 从来没有过的 pid，以及空名字，都不算命中。
+        assert!(!process_id_is_current_in(&root, "VRChat.exe", 999));
+        assert!(!process_id_is_current_in(&root, "   ", 100));
+    }
+
+    #[test]
+    fn a_restarted_process_is_found_under_its_new_pid() {
+        let root = scratch_root("restart");
+        fake_process(&root, 100, "VRChat.exe", "/opt/VRChat.exe");
+        assert_eq!(
+            find_process_id_in(&root, "VRChat.exe").expect("lookup"),
+            Some(100)
+        );
+
+        // VRChat 退出：旧 pid 失效，重新解析暂时找不到任何东西。
+        std::fs::remove_dir_all(root.join("100")).expect("remove process dir");
+        assert!(!process_id_is_current_in(&root, "VRChat.exe", 100));
+        assert_eq!(
+            find_process_id_in(&root, "VRChat.exe").expect("lookup"),
+            None
+        );
+
+        // 重启：新进程是别的 pid，按名字能重新找到它。
+        fake_process(&root, 250, "VRChat.exe", "/opt/VRChat.exe");
+        assert_eq!(
+            find_process_id_in(&root, "VRChat.exe").expect("lookup"),
+            Some(250)
         );
     }
 
