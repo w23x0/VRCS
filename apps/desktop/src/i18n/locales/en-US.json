@@ -1106,8 +1106,6 @@
         "systemOutputDescription": "Use the default Windows output device.",
         "systemOutputDescription_linux": "Use the default system output device.",
         "vrchatDescription": "Capture the output device selected by VRChat.",
-        "vrchatProcessExperimental": "VRChat (experimental)",
-        "vrchatProcessHint": "Experimental: only VRChat's audio is captured. If subtitles do not appear while VRChat is speaking, switch to \"System output\".",
         "disableOtherVoices": "Disable other voices",
         "disableOtherVoicesDescription": "Only transcribe your voice.",
         "ownVoice": "Your voice",

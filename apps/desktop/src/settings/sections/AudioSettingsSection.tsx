@@ -27,7 +27,6 @@ export function AudioSettingsSection({
   applySettings,
   onStartMicrophoneTest,
   onStopMicrophoneTest,
-  platform,
 }: {
   draft: Settings;
   devices: AudioDevice[];
@@ -43,10 +42,8 @@ export function AudioSettingsSection({
   applySettings: ApplySettings;
   onStartMicrophoneTest: () => Promise<void>;
   onStopMicrophoneTest: () => Promise<void>;
-  platform: string | null;
 }) {
   const { t } = useTranslation();
-  const vrchatProcessExperimental = platform === "linux";
   const microphoneLevel = useAudioLevel("microphone");
   const speakerLevel = useAudioLevel("speaker");
   const [microphoneTestBusy, setMicrophoneTestBusy] = useState(false);
@@ -136,9 +133,6 @@ export function AudioSettingsSection({
                   disabled={saveState === "saving" || draft.audio.output.mode === "disabled"}
                   onCommit={updateOutputThreshold}
                 />
-                {vrchatProcessExperimental && draft.audio.output.mode === "vrchat" && (
-                  <p className="external-api-feedback" role="status">{t("settings.audio.vrchatProcessHint")}</p>
-                )}
               </>
             )}
             devices={outputDevices}
@@ -156,7 +150,7 @@ export function AudioSettingsSection({
               },
               {
                 key: "vrchat",
-                name: vrchatProcessExperimental ? t("settings.audio.vrchatProcessExperimental") : "VRChat",
+                name: "VRChat",
                 chosen: draft.audio.output.mode === "vrchat",
                 onSelect: () => applySettings((current) => ({
                   ...current,

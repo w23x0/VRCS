@@ -6,7 +6,7 @@ Both entry points work on Linux: the Tauri desktop shell (packaged as `.deb` and
 
 ## Build prerequisites
 
-Verified on Ubuntu 26.04 (x64) with PipeWire 1.6.2 and WirePlumber, and on Ubuntu 24.04 (x64) with PipeWire 1.0.5 and WirePlumber 0.4.17 (build, both crates' tests, frontend tests, `.deb`/`.AppImage` bundles). The capture backend is built against the `pipewire` crate's `v0_3_65` API level; older PipeWire releases have not been tested.
+Verified on Ubuntu 26.04 (x64) with PipeWire 1.6.2 and WirePlumber 1.6.2, and on Ubuntu 24.04 (x64) with PipeWire 1.0.5 and WirePlumber 0.4.17 (build, both crates' tests, frontend tests, `.deb`/`.AppImage` bundles). The default-device semantics below were re-checked on PipeWire 1.6.2 with WirePlumber 1.6.2. The capture backend is built against the `pipewire` crate's `v0_3_65` API level; older PipeWire releases have not been tested.
 
 - Rust stable
 - Node.js 24+ (frontend only)
@@ -121,11 +121,23 @@ The bundles are not signed and do not include updater artifacts, so they are for
 - Sample rate comes from the PipeWire graph rate (`clock.rate` in the `settings` metadata, with `default.clock.rate` accepted as a legacy fallback); the channel count of a device is its node's `audio.channels`, and the default device is determined from the `default` metadata.
 - Per-process capture taps the target application's audio output streams; see below. If the tap cannot be created the capture reports `audio.process_loopback_unavailable` instead of silently falling back to whole-system audio.
 - Device endpoints are PipeWire `node.name` values, not WASAPI endpoint ids, so an audio configuration copied from Windows does not carry over.
-- A device chosen explicitly stays chosen, as with WASAPI: the stream carries `node.dont-reconnect`, so the session manager neither moves it to a new default device nor falls back to another device when it disappears. If the selected device goes away the capture stops with an error instead of silently recording something else. **System default** follows the default device when it changes (verified with WirePlumber 0.4.17; see issue 8 in [Known issues](KnownIssues.md) for WirePlumber 0.5).
+- A device chosen explicitly stays chosen, as with WASAPI: the stream carries `node.dont-reconnect`, so the session manager neither moves it to a new default device nor falls back to another device when it disappears. If the selected device goes away the capture stops with an error instead of silently recording something else. **System default** follows the default device when it changes (verified with WirePlumber 0.4.17 and 1.6.2: the default-mode stream does carry `target.object`, but the session manager moves it to the new default anyway — for sinks and for microphones, in both directions). See issue 8 in [Known issues](KnownIssues.md) for the evidence and for a manual re-verification recipe.
 
 ### Per-process capture
 
-> **Status: experimental.** The mechanism is covered by integration tests (they verify the tapped tone's spectrum and that a second application's audio is excluded). A time-warped capture was reported earlier when the mode was started through the Core; it could not be reproduced when the capture is driven exactly like the Core does (lookup by the process name `VRChat.exe`, `spawn_blocking` start, concurrent device polling), with a native and a PulseAudio-protocol player, 44.1 and 48 kHz streams: the tone arrived at the right frequency and level, and synthesized speech was accepted by the Silero VAD. It has not yet been checked with the real VRChat under Proton, so the option stays marked experimental; if you see no subtitles while VRChat is speaking, use **System output**. Tracked as issue 6 in [Known issues](KnownIssues.md).
+> **Status: not marked experimental any more** (decided by the repository owner, 2026-09-30). The
+> mechanism is covered by integration tests (they verify the tapped tone's spectrum and that a second
+> application's audio is excluded). A time-warped capture was reported earlier when the mode was
+> started through the Core; it could not be reproduced when the capture is driven exactly like the
+> Core does (lookup by the process name `VRChat.exe`, `spawn_blocking` start, concurrent device
+> polling), with a native and a PulseAudio-protocol player, 44.1 and 48 kHz streams: the tone arrived
+> at the right frequency and level, and synthesized speech was accepted by the Silero VAD. One
+> combination was also re-checked through the Core API on PipeWire 1.6.2 (PulseAudio-protocol
+> client, 48 kHz stereo, 440 Hz test tone: 440.00 Hz captured, level 0.4, ~16 000 frames/s). **The
+> label was removed without a run against the real VRChat under Proton** — the owner decided to skip
+> that step. If you see no subtitles while VRChat is speaking,
+> switch to **System output** and please report it; the question is tracked as issue 6 in
+> [Known issues](KnownIssues.md).
 
 Selecting VRChat (or any single application) as the source resolves the process id, then finds the
 audio output streams that belong to that process and links their output ports to a private capture
@@ -170,7 +182,7 @@ toolkit's runtime libraries (`cublas`, `cublasLt`, `cudart`, and `culibos` where
 | Local Whisper (CPU) | ✅ (subtitles verified end to end) |
 | Cloud ASR | ✅ (platform-independent code path) |
 | SQLite history + FTS | ✅ |
-| Per-process capture (VRChat only) | ⚠️ experimental: taps the application's own output streams; see the per-process capture section above for the observed limitation |
+| Per-process capture (VRChat only) | ✅ taps the application's own output streams; not verified with the real VRChat under Proton, see issue 6 |
 | VR Overlay | ❌ Windows only (GDI rendering + OpenVR) |
 | CUDA acceleration for local Whisper | ✅ build with `--features cuda`; requires the NVIDIA driver and a CUDA toolkit recent enough for the GPU (CUDA 13.2 was used here) |
 | VRCX-0 integration | ✅ platform-independent: a localhost WebSocket client with a token, no Windows-specific code. It needs a running VRCX-0 on the configured port and otherwise reports an error state, exactly as on Windows. Whether a Linux build of VRCX-0 serves the same API has not been verified here |

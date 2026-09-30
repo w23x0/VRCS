@@ -17,11 +17,11 @@ runtime check was possible it was performed (see the evidence line).
 | 3 | all | Settings → Software updates | Status line reads "Updates are not available for this build." for the moment before build info loads | Windows display |
 | 4 | all | Settings tab bar | `Debug` is the only category label not routed through i18n | Windows display |
 | 5 | Linux | Credential storage | **Fixed**: writes are serialized by an advisory lock | — |
-| 6 | Linux | Per-process capture | A time-warped capture was reported once; not reproducible with a Core-like harness | Needs a check with real VRChat under Proton |
+| 6 | Linux | Per-process capture | A time-warped capture was reported once; not reproducible with a Core-like harness, and the *experimental* label was removed by owner decision (2026-09-30) | Still unverified with real VRChat under Proton; kept for observation |
 | 7 | all | Translation prompt | The Norwegian target-language label reaches the model as mojibake (`Norwegian Bokm姘搇`) | 1-line string fix plus a table-consistency test |
-| 8 | Linux | Capture, *System default* | The default-mode stream still pins `target.object` to the default at start; whether WirePlumber 0.5 then follows a default change is unverified | `audio/linux/capture.rs` `prepare` |
+| 8 | Linux | Capture, *System default* | **Not a defect**: the default-mode stream does pin `target.object`, but WirePlumber 1.6.2 still moves it to the new default (verified for sinks and microphones, in both directions) | — |
 | 9 | all | Per-process capture | After VRChat restarts (new pid) the capture keeps waiting on the old pid and stays silent until it is restarted | Both backends |
-| 10 | Linux | Desktop shell | `xdg-open` children (open logs folder, open VRCX-0 page) are never reaped and stay as zombies until VRCS exits | `diagnostics.rs`, `lib.rs` |
+| 10 | Linux | Desktop shell | **Fixed**: launched helper processes are reaped by a background thread | — |
 
 ## 1. VR Overlay gate fails open when the status call fails
 
@@ -99,7 +99,7 @@ runtime check was possible it was performed (see the evidence line).
 
 ## 6. Per-process capture can deliver time-warped audio — not reproducible
 
-- **Documented in**: `docs/Linux.md`, "Per-process capture" (`Status: experimental`).
+- **Documented in**: `docs/Linux.md`, "Per-process capture" (no longer marked experimental).
 - **What was checked** (Ubuntu 24.04, PipeWire 1.0.5, WirePlumber 0.4.17): a throwaway in-crate probe
   drove `AudioCapture` exactly like the Core — `start(None, Some("VRChat.exe"))` inside
   `spawn_blocking` on a multi-thread runtime, with `list_devices()` polled every 500 ms alongside —
@@ -107,13 +107,19 @@ runtime check was possible it was performed (see the evidence line).
   (`pacat`, how Wine plays audio) players, 48 kHz and 44.1 kHz streams on a 48 kHz graph: the 440 Hz
   tone arrived at 440 Hz with the played level and ~16 000 frames/s, and synthesized speech tapped
   the same way was accepted by the Silero VAD (324 of 370 chunks flagged as speech, two segments).
+- **Re-checked through the Core API** (Ubuntu 26.04, PipeWire 1.6.2, WirePlumber 1.6.2): one
+  combination this round — a PulseAudio-protocol client playing a 48 kHz stereo 440 Hz test tone —
+  captured 440.00 Hz at level 0.4 and ~16 000 frames/s.
 - **One artifact worth knowing**: `pacat`/`paplay` choose their mode from `argv[0]`. A copy renamed to
   `VRChat.exe` plays a WAV as *raw* 44.1 kHz data unless `--file-format=wav` is given, which shifts a
   440 Hz tone to ~404 Hz — at the sink monitor too, so before VRCS sees it. A harness built that way
   reproduces exactly the "right level and rate, no peak where expected" symptom described earlier.
   Whether that explains the original report is not known.
-- **Next step**: one run with the real VRChat under Proton using the end-to-end recipe in
-  `docs/Linux.md`; if it is clean, the *experimental* label can go.
+- **Owner decision (2026-09-30)**: the *experimental* label was removed without that run. The entry
+  stays open for observation, because the report has still not been reproduced and the mode has
+  still not been exercised against the real VRChat under Proton. **Next step**: one run with the real
+  VRChat under Proton using the end-to-end recipe in `docs/Linux.md`; if it is clean, this entry can
+  be closed.
 
 ## 7. The Norwegian target-language label is corrupted in the LLM prompt
 
@@ -139,18 +145,59 @@ runtime check was possible it was performed (see the evidence line).
 - **Verification**: `cargo test --manifest-path core/Cargo.toml --lib providers` with the
   consistency test above.
 
-## 8. *System default* capture pins the current default node
+## 8. *System default* capture pins the current default node — not a defect on WirePlumber 1.6.2
 
 - **Code**: `core/src/audio/linux/capture.rs` (`prepare`) and `devices::resolve_target`
 - **What happens**: with no device selected, `resolve_target` still resolves the current default
-  node and the stream carries it as `target.object`. With WirePlumber 0.4.17 the stream follows a
-  later default change anyway (verified with `wpctl set-default` mid-capture: the capture moved to
-  the new default's monitor), which matches WASAPI's `follows_default`. WirePlumber 0.5 treats
-  `target.object` as a defined target, so there the capture may stay on the old default.
-- **Suggested fix**: leave `target.object` unset in default mode and let the session manager route
-  the `stream.capture.sink` stream to the default.
-- **Why it was not fixed**: not reproducible on this machine (no WirePlumber 0.5), and the current
-  behaviour is correct where it could be tested.
+  node and the stream carries it as `target.object`. The worry was that WirePlumber 0.5+ treats
+  `target.object` as a defined target and would therefore keep the capture on the old default
+  instead of following the change.
+- **Verified on WirePlumber 1.6.2** (PipeWire 1.6.2, real `wpctl set-default` during a capture
+  driven through `AudioCapture`, two null sinks playing 440 Hz and 220 Hz): the session manager
+  moves the stream to the new default anyway, so *System default* follows, matching WASAPI's
+  `follows_default`. The capture followed in both directions — 440 Hz → 220 Hz when the default
+  moved from `vrcs-d9-a` to `vrcs-d9-b`, and 220 Hz → 440 Hz when it moved back — and the link
+  moved with it (`vrcs-d9-a:monitor_FL |-> vrcs-capture:input_MONO` became
+  `vrcs-d9-b:monitor_FL |-> vrcs-capture:input_MONO`). The microphone direction behaves the same
+  way: with two virtual sources the capture followed `vrcs-d9-mic-a:capture_FL` to
+  `vrcs-d9-mic-b:capture_FL`. Explicitly selected devices did **not** follow in either direction,
+  which is the `node.dont-reconnect` fix from 3.2 in the review report.
+- **What the stream actually carries** (`pw-dump` on the live `vrcs-capture` node during
+  default-mode capture): `media.class = "Stream/Input/Audio"`, `stream.capture.sink = true`,
+  `target.object = "vrcs-d9-a"` and **no** `node.dont-reconnect`. The pin is real, and
+  WirePlumber 1.6.2 overrides it anyway — the microphone stream carries the same shape minus
+  `stream.capture.sink`.
+- **Why nothing was changed**: the behaviour is already correct on both WirePlumber generations
+  that have been tested, so leaving `target.object` unset in default mode would be a speculative
+  change. The entry stays because the pin is still in the code and a future session manager could
+  change that.
+- **Re-verification recipe** (not an automated test: it moves the system default device, which a
+  committed test must never do):
+
+  ```bash
+  # two low-priority null sinks so they cannot take the default on their own
+  pw-cli -m create-node adapter '{ factory.name=support.null-audio-sink node.name=d9-a \
+    node.description=d9-a media.class=Audio/Sink audio.position=[FL,FR] \
+    priority.session=1 priority.driver=1 }' &
+  pw-cli -m create-node adapter '{ factory.name=support.null-audio-sink node.name=d9-b \
+    node.description=d9-b media.class=Audio/Sink audio.position=[FL,FR] \
+    priority.session=1 priority.driver=1 }' &
+
+  # node.dont-reconnect keeps each player on its own sink (review report 3.1)
+  pw-play --target d9-a --properties '{ node.dont-reconnect = true }' a440.wav &
+  pw-play --target d9-b --properties '{ node.dont-reconnect = true }' b220.wav &
+
+  wpctl status          # the Sinks list prints each node's id: use d9-a's to start there
+  wpctl set-default <d9-a id>
+  # start the capture (explicit device = d9-a, or no device for *System default*),
+  # then mid-capture:  wpctl set-default <d9-b id>
+  # watch the dominant frequency and:  pw-link -l | grep -B1 vrcs-capture
+  ```
+
+  Expect *System default* to switch to 220 Hz and its link to `d9-b:monitor_FL`, and an explicit
+  `d9-a` to stay at 440 Hz on `d9-a:monitor_FL`. Restore the original default afterwards
+  (`wpctl set-default <original id>`, and check `pw-metadata -n default 0` — on WirePlumber 0.5+
+  `wpctl set-default` also rewrites `default.configured.audio.sink`).
 
 ## 9. Per-process capture does not follow a restarted VRChat
 
@@ -161,12 +208,25 @@ runtime check was possible it was performed (see the evidence line).
   running and produces no audio until the user stops and starts it.
 - **Why it was not fixed**: same behaviour on Windows, so it is a product change for both backends.
 
-## 10. `xdg-open` children are not reaped
+## 10. `xdg-open` children are not reaped — fixed
 
 - **Code**: `apps/desktop/src-tauri/src/diagnostics.rs` `open_directory`,
   `apps/desktop/src-tauri/src/lib.rs` `open_vrcx_repository`
-- **What happens**: `Command::spawn` without `wait`; unless something else reaps the child, each
-  click leaves a `<defunct>` process until VRCS exits. Found by reading the code, not observed at
-  runtime. Harmless in practice, but visible in `ps`.
-- **Suggested fix**: reap in a background thread, or use `tauri-plugin-opener`.
+- **Was**: `Command::spawn` without `wait`; unless something else reaps the child, each click left
+  a `<defunct>` process until VRCS exits. Found by reading the code, not observed at runtime.
+  Harmless in practice, but visible in `ps`.
+- **Now**: both call sites go through one helper, `reaper::spawn_detached`
+  (`apps/desktop/src-tauri/src/reaper.rs`), which spawns the command and hands the `Child` to a
+  named background thread (`vrcs-helper-reaper`) that `wait`s on it; a failed `wait` is only
+  logged with `tracing::debug!`. No new dependency — `tauri-plugin-opener` was not needed, and
+  adding it would have been the more Windows-visible change.
+- **Windows**: the helper is shared, because the command construction already was. On Windows this
+  closes the `explorer.exe` handle from a background thread instead of dropping it inline; nothing
+  is read from the child, the exit status was never used, and the UI thread still does not block,
+  so the user-visible behaviour is unchanged.
+- **Verification**: `reaper::tests` (Linux-only) covers both directions —
+  `child_spawned_without_waiting_stays_a_zombie` spawns `true` and drops the `Child`, and polls
+  `/proc/<pid>/stat` until the state is `Z`; `detached_helper_is_reaped` spawns `true` through the
+  helper and polls until the pid is gone from `/proc` entirely. With the reaping thread removed the
+  second test fails with `last state Some('Z')`, so it is not vacuous.
 

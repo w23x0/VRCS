@@ -10,8 +10,8 @@
 - **本轮新发现并修复了 3 个缺陷，另外修了 1 个遗留问题**，每个一个 commit（见第 3 节）。其中两个会直接影响用户：
   - 用户明确选择的采集设备，会在系统默认设备变化时被 WirePlumber 悄悄换成别的设备；
   - 之前的移植把 15 条文案（7 条音频错误提示和 8 条其他文案）改成了平台中性的措辞，Windows 用户因此看不到原来的 Windows 专属处理建议（违反了“不改变 Windows 行为”）。现在上游已有的每个文案键，在 4 种语言里都与上游逐字一致，Linux 另外显示 `_linux` 变体（第二轮按 D2 完成）。
-- **遗留问题 #6（按进程采集“时间扭曲”）无法复现。** 我用和 Core 相同的方式驱动采集（按进程名查找、`spawn_blocking` 启动、同时轮询设备列表），分别用原生客户端和 PulseAudio 协议客户端、44.1 kHz 和 48 kHz 测试，音频的频率和电平都正确，合成语音也能通过 Silero VAD。另外找到一个测试工具本身的陷阱，可以原样复现当时报告的症状（见 4.2）。要去掉“实验性”标签，还需要在真实的 VRChat/Proton 上跑一次，这一步我这里做不了。
-- **决定事项已处理到收尾**（见第 6 节）：D2、D6、D7 已完成，D3、D8 保留现状，D4、D5 只提给上游。只剩 D1、D9 两项需要你在真实 VRChat 或更新的 PipeWire/WirePlumber 环境上验证。
+- **遗留问题 #6（按进程采集“时间扭曲”）无法复现。** 我用和 Core 相同的方式驱动采集（按进程名查找、`spawn_blocking` 启动、同时轮询设备列表），分别用原生客户端和 PulseAudio 协议客户端、44.1 kHz 和 48 kHz 测试，音频的频率和电平都正确，合成语音也能通过 Silero VAD。另外找到一个测试工具本身的陷阱，可以原样复现当时报告的症状（见 4.2）。**“实验性”标签已按你的决定去掉**（2026-09-30），没有在真实的 VRChat/Proton 上验证过；本轮又经 Core API 在 PipeWire 1.6.2 上复验了一个组合（Pulse 协议客户端 48 kHz 立体声 440 Hz：采到 440.00 Hz、电平 0.4、约 16 000 帧/秒）。条目仍保留待观察。
+- **决定事项已全部处理**（见第 6 节）：D1 已按你的决定完成，D2、D6、D7、D9 已完成，D3、D8 保留现状，D4、D5 只提给上游。
 - 上游 `main` 的 **`Cargo.lock` 和版本号不同步**，所以 `--locked` 会失败，上游 CI 大概率已经是红的。这是给上游的第一条建议（见第 5 节）。
 
 ## 2. 验证
@@ -24,6 +24,8 @@
 | 音频 | PipeWire 1.0.5、WirePlumber 0.4.17、pipewire-pulse，无头会话（自建 dbus + 空 sink） |
 | 工具链 | Rust 1.94.1，Node 24.9.0，CMake 3.28，clang 18 |
 | 图形 | Xvfb（X11），WebKitGTK 4.1 |
+
+D9（见第 6 节）另外在一台真实桌面机上复验：Ubuntu 26.04、PipeWire 1.6.2、WirePlumber 1.6.2、GNOME 会话；采集和播放都只用空 sink 和虚拟 source。
 
 原有文档是在 Ubuntu 26.04 / PipeWire 1.6.2 上验证的，这次补充了一个更旧的组合。
 
@@ -50,11 +52,11 @@
 | 系统音频（sink monitor）→ Silero VAD | ✅ 380 块中 283 块判为语音，切出语音段 |
 | 按进程（伪 `VRChat.exe`）→ Silero VAD | ✅ 370 块中 324 块判为语音，切出 2 段 |
 | 按进程采集的频率和电平（原生 / Pulse、44.1k / 48k、同时轮询设备） | ✅ 440 Hz 输入就采到 440 Hz，电平 0.400，约 16 000 帧/秒 |
-| 显式选设备后切换默认设备 | ❌ → ✅ 已修复，见 3.2 |
+| 显式选设备后切换默认设备 | ❌ → ✅ 已修复，见 3.2；在 WirePlumber 1.6.2 上复验仍然是"不跟随"（正反两个方向） |
 | 显式选择的设备被拔出 | ✅ 修复后采集以错误结束，不再悄悄改录其他设备 |
-| System default 模式下切换默认设备 | ✅ 在 WirePlumber 0.4.17 上会跟随新的默认设备，与 WASAPI 一致 |
+| System default 模式下切换默认设备 | ✅ 会跟随新的默认设备，与 WASAPI 一致；WirePlumber 0.4.17 和 1.6.2 都验证过，sink 和 source 两个方向、正反两个方向都跟随，见 D9 |
 
-**没有验证的：** CUDA（没有 GPU）、Wayland（只测了 X11）、真实声卡（只用空 sink）、真实的 VRChat/Proton、Whisper 识别、WirePlumber 0.5、PipeWire 0.3.x。
+**没有验证的：** CUDA（没有 GPU）、Wayland（只测了 X11）、真实声卡（只用空 sink 和虚拟 source，D9 的复验也一样）、真实的 VRChat/Proton、Whisper 识别、PipeWire 0.3.x。
 
 临时探针（用来对比 Core 调用方式、测 VAD、测默认设备切换的一次性测试）已经从工作区删除，没有提交。
 
@@ -107,6 +109,22 @@
 
 核对过：桌面壳只把路径传给 Core，界面通过 Core API 修改设置，`save_config` 是唯一的写入方，所以同一个安装里本来就只有一个写入方。缺的是运行第二个 Core 时的规则。`docs/Linux.md` 的 `VRCS_CONFIG` 一行和前端开发流程里写明：独立启动的 Core 要用自己的配置文件，不能在桌面程序运行时共用它的配置；凭据文件不同，它本来就是共享的，写入有锁。`docs/KnownIssues.md` #5 记录了这个决定。
 
+### 3.9 D9 复验：WirePlumber 1.6.2 上 #8 不成立，两个语义都正确
+
+在真实桌面机（Ubuntu 26.04、PipeWire 1.6.2、WirePlumber 1.6.2）上复验 3.2 和 #8。搭法照第 7 节：两个低优先级空 sink（`vrcs-d9-a` / `vrcs-d9-b`）分别用 `pw-play --target … --properties '{ node.dont-reconnect = true }'` 播放 440 Hz 和 220 Hz 的 wav（4.2 的陷阱：不用改名的 `paplay`），麦克风方向用两个 `pw-loopback` 虚拟 source。采集由 `core/src/audio/linux/mod.rs` 里一个临时的 `#[ignore]` 测试驱动，走 `AudioCapture::start()` 这条产品路径；采到的主频用 `tone_magnitude` 按 1.5 秒一窗算，同时用 `pw-link -l` 记下 `vrcs-capture` 实际链到哪个节点。第 4 窗执行 `wpctl set-default`，正反两个方向都跑。
+
+| 场景 | 切换前 | 切换后 | 结论 |
+|---|---|---|---|
+| 显式选 `vrcs-d9-a` | 440 Hz，`vrcs-d9-a:monitor_FL -> vrcs-capture:input_MONO` | 仍是 440 Hz，链路不变 | ✅ 不跟随（3.2 的修复仍然成立） |
+| 显式选 `vrcs-d9-b`，切到 A | 220 Hz，`vrcs-d9-b:monitor_FL` | 仍是 220 Hz，链路不变 | ✅ 不跟随（反向） |
+| System default，A→B | 440 Hz，`vrcs-d9-a:monitor_FL` | 220 Hz，`vrcs-d9-b:monitor_FL` | ✅ 跟随 |
+| System default，B→A | 220 Hz，`vrcs-d9-b:monitor_FL` | 440 Hz，`vrcs-d9-a:monitor_FL` | ✅ 跟随（反向） |
+| System default 麦克风，`vrcs-d9-mic-a`→`vrcs-d9-mic-b` | 440 Hz，`vrcs-d9-mic-a:capture_FL` | 220 Hz，`vrcs-d9-mic-b:capture_FL` | ✅ 跟随 |
+
+- **#8 不成立。** 采集期间 `pw-dump` 显示默认模式的流确实带着 `target.object`（`target.object = "vrcs-d9-a"`，没有 `node.dont-reconnect`，`stream.capture.sink = true`），但 WirePlumber 1.6.2 照样把流挪到新的默认节点上。麦克风方向同理（同样的形状，只是没有 `stream.capture.sink`）。因此不改产品代码：`resolve_target` 保留它用于 UI 显示的解析结果，`prepare` 照旧写 `target.object`，实际语义已经和 WASAPI 的 `follows_default` 一致。
+- **显式模式的修复没有被 0.5+ 破坏**：带 `node.dont-reconnect = true` 的流在 1.6.2 上仍然不跟随，正反两个方向都验证过。
+- **为什么没有留下自动化测试**：验证"默认跟随"必须改系统的默认音频设备，仓库里已有的集成测试都不碰它，所以这段探针实验结束后删掉了，没有提交；`docs/KnownIssues.md` #8 里写了完整的手工复现步骤，性质和 4.2 的测试陷阱一样属于"要靠人跑"的记录。
+
 ## 4. 未修复的问题（附原因）
 
 编号 1–10 与 `docs/KnownIssues.md` 一致。
@@ -117,11 +135,11 @@
 | 2 | `app_build_info` 失败时，Linux 无边框窗口没有缩放把手 | 这是同步命令，几乎不会失败；组件与 Windows 共用，收益太低。按 D4 不处理 |
 | 3 | build info 加载完成前，更新状态短暂显示“不可用” | 上游本来就有，Windows 也能看到。按 D4 只提给上游（U5） |
 | 4 | `Debug` 分类标签没有走 i18n | 上游本来就有，Windows 也能看到。按 D4 只提给上游（U6） |
-| 6 | 按进程采集“时间扭曲” | **无法复现**，见 4.2。缺少真实 VRChat/Proton 环境，所以“实验性”标签暂时保留（D1） |
+| 6 | 按进程采集“时间扭曲” | **无法复现**，见 4.2。“实验性”标签已按决定去掉（D1），但没有在真实的 VRChat/Proton 上验证过，条目仍待观察 |
 | 7 | 挪威语目标语言名是乱码 `Norwegian Bokm姘搇`，会进入 LLM 提示词 | 上游 `1aa70f1` 引入，所有平台都受影响。按 D5 只提给上游（U2） |
-| 8 | System default 模式在启动时仍把当前默认节点写进 `target.object` | 在 WirePlumber 0.4.17 上行为正确（会跟随）；在 0.5 上可能被钉死在旧的默认设备上，但我这里没有 0.5，无法验证，不硬改 |
+| 8 | System default 模式在启动时仍把当前默认节点写进 `target.object` | 已在 WirePlumber 1.6.2 上复验：**不是缺陷**，session manager 仍然会把流挪到新的默认设备上（见 D9），所以不改产品代码 |
 | 9 | VRChat 重启（pid 变化）后，按进程采集不会跟随新进程，一直静音 | Windows 后端同样按 pid 绑定，属于两端都要改的产品行为。已列为上游草稿 U9 |
-| 10 | `xdg-open` 子进程没有回收（僵尸进程） | 通过读代码发现，没有实际观察到；影响可以忽略 |
+| 10 | `xdg-open` 子进程没有回收（僵尸进程） | **已修复**（见 `docs/KnownIssues.md` #10）：两处 `spawn` 改用共用的 `reaper::spawn_detached`，由具名后台线程 `wait` 回收；Windows 上只是把句柄的关闭挪到后台线程，用户可见行为不变。`reaper::tests` 里有一个对照测试直接观察到 `Z` 状态，修复前 `detached_helper_is_reaped` 会失败 |
 
 ### 4.1 其他观察（没有列入 KnownIssues）
 
@@ -189,7 +207,7 @@ pid 只在开始采集时查一次。VRChat 重开以后 pid 变了，采集还�
 
 | # | 事项 | 结果 |
 |---|---|---|
-| D1 | 按进程采集是否去掉“实验性”标签 | **待定**：需要你在真实的 VRChat/Proton 上按 `docs/Linux.md` 的端到端流程跑一次，干净的话就去掉（涉及 `AudioSettingsSection.tsx` 和 4 个语言文件） |
+| D1 | 按进程采集是否去掉“实验性”标签 | **已完成**：所有者决定不做真实 VRChat 验证，直接去掉实验性标签（2026-09-30）。Linux 与 Windows 一样显示 “VRChat”，提示块和两个语言键都已删除；没有在真实的 VRChat/Proton 上验证过，`docs/KnownIssues.md` #6 仍保留待观察 |
 | D2 | 其余 Windows 可见措辞改成 `_linux` 变体 | **已完成**，见 3.5 |
 | D3 | `a4ea843`（OSC 测试消息绕过静音门）在所有平台上生效 | **保留** |
 | D4 | KnownIssues #1–#4 | #3、#4 只提给上游（U5、U6）；#1、#2 不处理 |
@@ -197,7 +215,7 @@ pid 只在开始采集时查一次。VRChat 重开以后 pid 变了，采集还�
 | D6 | `.deb` 声明 `libpipewire-0.3-0 (>= 0.3.65)` | **已完成**，见 3.7 |
 | D7 | `config.json` 多进程写入 | **已完成**：Core 是唯一写入方，不加锁，文档里写明规则，见 3.8 |
 | D8 | 凭据存储 | **继续用** 0600 文件加锁 |
-| D9 | 在 WirePlumber 0.5 / PipeWire 1.6 上复验 #8 和 3.2 | **待定**：需要你提供环境，验证方法见 `docs/KnownIssues.md` #8 |
+| D9 | 在 WirePlumber 0.5 / PipeWire 1.6 上复验 #8 和 3.2 | **已完成**：在 PipeWire 1.6.2 + WirePlumber 1.6.2 上复验，两个语义都正确，#8 不成立，不改产品代码，只更新文档。证据见第 3.9 节 |
 | D10 | 与上游的关系 | 本分支不推送上游 `main`，第 5 节只作为建议 |
 
 ## 7. 复现本报告的验证
@@ -218,4 +236,4 @@ npm ci && npm run check:i18n && npm --workspace apps/desktop test && npm run bui
 npm --workspace apps/desktop run build:linux
 ```
 
-显式设备与默认设备切换的复现方法：创建两个空 sink（`pw-cli -m create-node adapter '{ factory.name=support.null-audio-sink node.name=sink-a media.class=Audio/Sink … }'`），分别用 `pw-play --target` 播放不同频率的音调，选中 `sink-a` 开始采集，然后执行 `wpctl set-default <sink-b 的 id>`，观察采到的频率。
+显式设备与默认设备切换的复现方法：创建两个空 sink（`pw-cli -m create-node adapter '{ factory.name=support.null-audio-sink node.name=sink-a media.class=Audio/Sink … }'`），分别用 `pw-play --target --properties '{ node.dont-reconnect = true }'` 播放不同频率的音调，选中 `sink-a` 开始采集，然后执行 `wpctl set-default <sink-b 的 id>`，观察采到的频率和 `pw-link -l` 里 `vrcs-capture` 的对端。完整的步骤（含麦克风方向、恢复默认设备的方法）见 `docs/KnownIssues.md` #8；在 WirePlumber 0.4.17 和 1.6.2 上的结果见 3.2 和 3.9。
