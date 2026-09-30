@@ -1106,8 +1106,6 @@
         "systemOutputDescription": "使用 Windows 默认输出设备。",
         "systemOutputDescription_linux": "使用系统默认输出设备。",
         "vrchatDescription": "捕获 VRChat 选择的输出设备。",
-        "vrchatProcessExperimental": "VRChat（实验性）",
-        "vrchatProcessHint": "实验性功能：只捕获 VRChat 的声音。如果 VRChat 说话时没有出现字幕，请切换到“系统输出”。",
         "disableOtherVoices": "禁用其他人的声音",
         "disableOtherVoicesDescription": "只转写自己的声音。",
         "ownVoice": "自己的声音",

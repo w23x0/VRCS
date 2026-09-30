@@ -17,7 +17,7 @@ runtime check was possible it was performed (see the evidence line).
 | 3 | all | Settings → Software updates | Status line reads "Updates are not available for this build." for the moment before build info loads | Windows display |
 | 4 | all | Settings tab bar | `Debug` is the only category label not routed through i18n | Windows display |
 | 5 | Linux | Credential storage | **Fixed**: writes are serialized by an advisory lock | — |
-| 6 | Linux | Per-process capture | A time-warped capture was reported once; not reproducible with a Core-like harness | Needs a check with real VRChat under Proton |
+| 6 | Linux | Per-process capture | A time-warped capture was reported once; not reproducible with a Core-like harness, and the *experimental* label was removed by owner decision (2026-09-30) | Still unverified with real VRChat under Proton; kept for observation |
 | 7 | all | Translation prompt | The Norwegian target-language label reaches the model as mojibake (`Norwegian Bokm姘搇`) | 1-line string fix plus a table-consistency test |
 | 8 | Linux | Capture, *System default* | **Not a defect**: the default-mode stream does pin `target.object`, but WirePlumber 1.6.2 still moves it to the new default (verified for sinks and microphones, in both directions) | — |
 | 9 | all | Per-process capture | After VRChat restarts (new pid) the capture keeps waiting on the old pid and stays silent until it is restarted | Both backends |
@@ -99,7 +99,7 @@ runtime check was possible it was performed (see the evidence line).
 
 ## 6. Per-process capture can deliver time-warped audio — not reproducible
 
-- **Documented in**: `docs/Linux.md`, "Per-process capture" (`Status: experimental`).
+- **Documented in**: `docs/Linux.md`, "Per-process capture" (no longer marked experimental).
 - **What was checked** (Ubuntu 24.04, PipeWire 1.0.5, WirePlumber 0.4.17): a throwaway in-crate probe
   drove `AudioCapture` exactly like the Core — `start(None, Some("VRChat.exe"))` inside
   `spawn_blocking` on a multi-thread runtime, with `list_devices()` polled every 500 ms alongside —
@@ -107,13 +107,19 @@ runtime check was possible it was performed (see the evidence line).
   (`pacat`, how Wine plays audio) players, 48 kHz and 44.1 kHz streams on a 48 kHz graph: the 440 Hz
   tone arrived at 440 Hz with the played level and ~16 000 frames/s, and synthesized speech tapped
   the same way was accepted by the Silero VAD (324 of 370 chunks flagged as speech, two segments).
+- **Re-checked through the Core API** (Ubuntu 26.04, PipeWire 1.6.2, WirePlumber 1.6.2): one
+  combination this round — a PulseAudio-protocol client playing a 48 kHz stereo 440 Hz test tone —
+  captured 440.00 Hz at level 0.4 and ~16 000 frames/s.
 - **One artifact worth knowing**: `pacat`/`paplay` choose their mode from `argv[0]`. A copy renamed to
   `VRChat.exe` plays a WAV as *raw* 44.1 kHz data unless `--file-format=wav` is given, which shifts a
   440 Hz tone to ~404 Hz — at the sink monitor too, so before VRCS sees it. A harness built that way
   reproduces exactly the "right level and rate, no peak where expected" symptom described earlier.
   Whether that explains the original report is not known.
-- **Next step**: one run with the real VRChat under Proton using the end-to-end recipe in
-  `docs/Linux.md`; if it is clean, the *experimental* label can go.
+- **Owner decision (2026-09-30)**: the *experimental* label was removed without that run. The entry
+  stays open for observation, because the report has still not been reproduced and the mode has
+  still not been exercised against the real VRChat under Proton. **Next step**: one run with the real
+  VRChat under Proton using the end-to-end recipe in `docs/Linux.md`; if it is clean, this entry can
+  be closed.
 
 ## 7. The Norwegian target-language label is corrupted in the LLM prompt
 

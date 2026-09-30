@@ -1106,8 +1106,6 @@
         "systemOutputDescription": "Windows の既定の出力デバイスを使用します。",
         "systemOutputDescription_linux": "システムの既定の出力デバイスを使用します。",
         "vrchatDescription": "VRChat で選択した出力デバイスを取得します。",
-        "vrchatProcessExperimental": "VRChat（実験的）",
-        "vrchatProcessHint": "実験的機能：VRChat の音声のみを取り込みます。VRChat が話しているのに字幕が表示されない場合は、「システム出力」に切り替えてください。",
         "disableOtherVoices": "相手の声を無効化",
         "disableOtherVoicesDescription": "自分の声だけを文字起こしします。",
         "ownVoice": "自分の声",

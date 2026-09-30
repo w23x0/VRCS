@@ -211,7 +211,6 @@ export function SettingsPanel({
           applySettings={applySettings}
           onStartMicrophoneTest={onStartMicrophoneTest}
           onStopMicrophoneTest={onStopMicrophoneTest}
-          platform={updater.buildInfo?.platform ?? null}
         />
       )}
 
