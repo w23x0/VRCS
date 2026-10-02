@@ -20,7 +20,7 @@ runtime check was possible it was performed (see the evidence line).
 | 6 | Linux | Per-process capture | A time-warped capture was reported once; not reproducible with a Core-like harness, and the *experimental* label was removed by owner decision (2026-09-30) | Still unverified with real VRChat under Proton; kept for observation |
 | 7 | all | Translation prompt | The Norwegian target-language label reaches the model as mojibake (`Norwegian Bokm姘搇`) | 1-line string fix plus a table-consistency test |
 | 8 | Linux | Capture, *System default* | **Not a defect**: the default-mode stream does pin `target.object`, but WirePlumber 1.6.2 still moves it to the new default (verified for sinks and microphones, in both directions) | — |
-| 9 | all | Per-process capture | After VRChat restarts (new pid) the capture keeps waiting on the old pid and stays silent until it is restarted | Both backends |
+| 9 | Linux | Per-process capture | **Fixed**: the capture re-resolves the pid by process name when the target process exits, and moves the tap to the restarted application | Windows still binds to the pid, see below |
 | 10 | Linux | Desktop shell | **Fixed**: launched helper processes are reaped by a background thread | — |
 
 ## 1. VR Overlay gate fails open when the status call fails
@@ -199,14 +199,37 @@ runtime check was possible it was performed (see the evidence line).
   (`wpctl set-default <original id>`, and check `pw-metadata -n default 0` — on WirePlumber 0.5+
   `wpctl set-default` also rewrites `default.configured.audio.sink`).
 
-## 9. Per-process capture does not follow a restarted VRChat
+## 9. Per-process capture does not follow a restarted VRChat — fixed on Linux
 
-- **Code**: `core/src/audio.rs` `AudioCapture::start` resolves the pid once; both
-  `audio/linux/capture.rs` (tap by pid) and `audio/wasapi/capture.rs` (process loopback by pid)
-  keep that pid for the whole session.
-- **What breaks**: when VRChat exits and starts again, the new process is never tapped; capture keeps
-  running and produces no audio until the user stops and starts it.
-- **Why it was not fixed**: same behaviour on Windows, so it is a product change for both backends.
+- **Code**: `core/src/audio.rs` `AudioCapture::start` resolves the pid once; `audio/linux/capture.rs`
+  (tap by pid) and `audio/wasapi/capture.rs` (process loopback by pid) both kept that pid for the
+  whole session.
+- **What broke**: when VRChat exits and starts again, the new process is never tapped; capture kept
+  running and produced no audio until the user stopped and started it.
+- **Now (Linux)**: the process name travels with the capture target
+  (`CaptureTarget::process(pid, name)`, `core/src/audio/linux/mod.rs`). Every ~250 ms refresh
+  (`audio/linux/capture.rs`, `follow_target_process`) checks that the pid is still the target
+  process — `/proc/<pid>` gone, or the pid reused by something else, both count as gone — and, at
+  most once a second, resolves the name again. A new pid is adopted, the old streams' tap proxies
+  are dropped when they disappear from the graph, and a `tracing::info!` line records the switch.
+  While the old process is alive nothing changes. While no new process exists the capture stays
+  silent rather than failing or falling back to whole-system audio.
+- **Windows is unchanged**: the WASAPI backend binds its loopback client to the pid resolved at
+  start (`audio/wasapi/capture.rs`, `CaptureTarget::Process(process_id)`), and its
+  `CaptureTarget::process` deliberately drops the name — that path is untouched, so a restarted
+  VRChat still needs a manual restart of capture on Windows. Changing it is a product decision for
+  that backend, not a Linux port fix.
+- **Verification**:
+  - `audio::linux::devices::tests::the_captured_process_is_tracked_until_it_exits_or_gets_reused`
+    (process still alive / exited / pid reused / pid reused back by the same name) and
+    `a_restarted_process_is_found_under_its_new_pid` against a synthetic procfs tree;
+  - `audio::linux::capture::tests::a_live_target_is_never_looked_up_again` and
+    `a_missing_target_is_relooked_up_throttled_and_adopts_a_new_pid` for the throttle and the switch;
+  - `audio::linux::tests::process_capture_follows_a_restarted_process` (PipeWire integration): a
+    player named `VRChat.exe` plays 440 Hz, the process is killed by pid, a second player with the
+    same name plays 220 Hz, and the running capture picks up 220 Hz without being restarted —
+    measured at ~1 s, which is the re-lookup throttle. With the follow logic stubbed out the same
+    test captures 0 frames, so it is not vacuous.
 
 ## 10. `xdg-open` children are not reaped — fixed
 

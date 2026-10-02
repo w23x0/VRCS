@@ -138,13 +138,13 @@ D9（见第 6 节）另外在一台真实桌面机上复验：Ubuntu 26.04、Pip
 | 6 | 按进程采集“时间扭曲” | **无法复现**，见 4.2。“实验性”标签已按决定去掉（D1），但没有在真实的 VRChat/Proton 上验证过，条目仍待观察 |
 | 7 | 挪威语目标语言名是乱码 `Norwegian Bokm姘搇`，会进入 LLM 提示词 | 上游 `1aa70f1` 引入，所有平台都受影响。按 D5 只提给上游（U2） |
 | 8 | System default 模式在启动时仍把当前默认节点写进 `target.object` | 已在 WirePlumber 1.6.2 上复验：**不是缺陷**，session manager 仍然会把流挪到新的默认设备上（见 D9），所以不改产品代码 |
-| 9 | VRChat 重启（pid 变化）后，按进程采集不会跟随新进程，一直静音 | Windows 后端同样按 pid 绑定，属于两端都要改的产品行为。已列为上游草稿 U9 |
+| 9 | VRChat 重启（pid 变化）后，按进程采集不会跟随新进程，一直静音 | **Linux 已修复**（见 `docs/KnownIssues.md` #9）：进程名随采集目标传进后端，旧 pid 失效后最多每秒按名字重新解析一次，找到新进程就把 tap 切过去。Windows 后端仍按 pid 绑定，属于该后端的产品行为，未改；上游草稿 U9 继续保留 |
 | 10 | `xdg-open` 子进程没有回收（僵尸进程） | **已修复**（见 `docs/KnownIssues.md` #10）：两处 `spawn` 改用共用的 `reaper::spawn_detached`，由具名后台线程 `wait` 回收；Windows 上只是把句柄的关闭挪到后台线程，用户可见行为不变。`reaper::tests` 里有一个对照测试直接观察到 `Z` 状态，修复前 `detached_helper_is_reaped` 会失败 |
 
 ### 4.1 其他观察（没有列入 KnownIssues）
 
 - **`a4ea843` 改变了所有平台的 OSC 行为**：“测试”按钮会绕过静音门，总是发送。这是一个合理的修复，按 D3 保留。
-- 自动检查更新开关被置灰以后，仍然显示为“开”的状态（截图中可见）；因为它是禁用的，功能上没有影响。
+- 自动检查更新开关被置灰以后，仍然显示为“开”的状态（截图中可见）；因为它是禁用的，功能上没有影响。**已修复**：开关的显示值抽成纯函数 `automaticChecksToggleState`，已知没有更新器（build info 已加载且 `updaterAvailable === false`）时显示为关并保持禁用，只改显示、不改存储的偏好；build info 还是 `null` 时照旧显示偏好值，正式版（`updaterAvailable` 为 true）行为不变。
 - 托盘探测只检查 SNI watcher。只提供 XEmbed 托盘的桌面可能被误判为“没有托盘”，没有验证。
 
 ### 4.2 关于 #6 的一个测试陷阱
@@ -190,6 +190,8 @@ D9（见第 6 节）另外在一台真实桌面机上复验：Ubuntu 26.04、Pip
 ### U9. VRChat 重启以后，按进程采集就没声了
 
 pid 只在开始采集时查一次。VRChat 重开以后 pid 变了，采集还显示在运行，但一直没有声音，只能手动停掉再开。可以定期检查一下进程还在不在，不在了就重新按名字找一次；最起码进程退出时报一个 `audio.vrchat_not_running`，让用户知道。
+
+**Linux 侧已按上面的办法修掉**（见 `docs/KnownIssues.md` #9）：旧 pid 失效后最多每秒按名字重新解析一次，找到新进程就把 tap 切过去，找不到就安静等，不报错也不回退到整机音频。因此本条对 Windows 仍然成立——WASAPI 后端只拿到 pid，按名字重新解析需要一并改掉 `CaptureTarget` 的取用方式，属于那个后端的产品行为，本次未动。
 
 ### U10. `npm run build` 只能在 Windows 上跑
 

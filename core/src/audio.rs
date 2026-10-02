@@ -143,7 +143,9 @@ impl AudioCapture {
             let process_id = platform::find_process_id(name)?.ok_or_else(|| {
                 AudioError::with_code("audio.vrchat_not_running", "VRChat is not running")
             })?;
-            return self.start_session(platform::CaptureTarget::Process(process_id));
+            // 进程名也交给后端：Linux 采集期间用它跟随 VRChat 重启（新的 pid）。
+            // WASAPI 仍只按 pid 绑定，`CaptureTarget::process` 在那边忽略这个名字。
+            return self.start_session(platform::CaptureTarget::process(process_id, name));
         }
         let direction = match self.source {
             CaptureSource::Speaker => platform::DeviceDirection::Render,
