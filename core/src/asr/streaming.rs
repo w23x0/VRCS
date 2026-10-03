@@ -485,13 +485,15 @@ async fn run_session_buffered(
     let outcome = run_session_inner(
         provider,
         config,
-        socket,
-        task_id,
-        audio,
-        events,
-        stop,
-        &mut normalization,
-        replay,
+        &mut SessionIo {
+            socket,
+            task_id,
+            audio,
+            events,
+            stop,
+            normalization: &mut normalization,
+            replay,
+        },
     )
     .await;
     if matches!(
@@ -514,17 +516,31 @@ fn alignment_worker(provider: Provider, config: &AsrConfig) -> Option<alignment:
         .then(|| alignment::Worker::new(config))
 }
 
+/// The live session I/O a running translation session drives. Grouped into one
+/// struct so the session loop signature stays readable and the caller cannot
+/// accidentally swap two channels.
+struct SessionIo<'a> {
+    socket: &'a mut Socket,
+    task_id: Option<&'a str>,
+    audio: &'a mut mpsc::Receiver<StreamingInput>,
+    events: &'a mpsc::Sender<CloudEvent>,
+    stop: &'a mut watch::Receiver<bool>,
+    normalization: &'a mut NormalizationState,
+    replay: &'a mut VecDeque<StreamingInput>,
+}
+
 async fn run_session_inner(
     provider: Provider,
     config: &AsrConfig,
-    socket: &mut Socket,
-    task_id: Option<&str>,
-    audio: &mut mpsc::Receiver<StreamingInput>,
-    events: &mpsc::Sender<CloudEvent>,
-    stop: &mut watch::Receiver<bool>,
-    normalization: &mut NormalizationState,
-    replay: &mut VecDeque<StreamingInput>,
+    io: &mut SessionIo<'_>,
 ) -> Result<SessionEnd, String> {
+    let socket = &mut *io.socket;
+    let task_id = io.task_id;
+    let audio = &mut *io.audio;
+    let events = io.events;
+    let stop = &mut *io.stop;
+    let normalization = &mut *io.normalization;
+    let replay = &mut *io.replay;
     let mut aligner = alignment_worker(provider, config);
     let mut audio_buffer = Vec::with_capacity(2048);
     let mut pending_audio = false;

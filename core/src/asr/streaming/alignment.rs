@@ -423,17 +423,22 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let mut config = AsrConfig::default();
-        config.active_profile_id = Some("recognition".into());
-        config.api_profiles.push(ApiProfile {
-            id: "local-alignment".into(),
-            provider: crate::providers::OLLAMA_PROVIDER.into(),
-            base_url: Some(format!("http://{address}/v1")),
-            auth_mode: crate::config::ApiAuthMode::None,
-            ..ApiProfile::default()
-        });
-        config.live_alignment.profile_id = Some("local-alignment".into());
-        config.live_alignment.model = "user-chosen-model".into();
+        let config = AsrConfig {
+            active_profile_id: Some("recognition".into()),
+            api_profiles: vec![ApiProfile {
+                id: "local-alignment".into(),
+                provider: crate::providers::OLLAMA_PROVIDER.into(),
+                base_url: Some(format!("http://{address}/v1")),
+                auth_mode: crate::config::ApiAuthMode::None,
+                ..ApiProfile::default()
+            }],
+            live_alignment: crate::config::LiveAlignmentConfig {
+                profile_id: Some("local-alignment".into()),
+                model: "user-chosen-model".into(),
+                ..crate::config::LiveAlignmentConfig::default()
+            },
+            ..AsrConfig::default()
+        };
         let mut worker = Worker::new(&config);
         worker.start_final(|| Some(window("valid")));
         let (_, mapping) = tokio::time::timeout(Duration::from_secs(2), worker.recv())

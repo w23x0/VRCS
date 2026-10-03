@@ -340,8 +340,8 @@ fn validated_cuts(
     let (mut source_start, mut target_start) = (0, 0);
     // Validate all boundaries before mutating any pending text.
     for (index, group) in mapping.groups.iter().enumerate() {
-        let source_end = boundary_end(&window.sources, &source_text, &group.source_end)?;
-        let target_end = boundary_end(&window.targets, &target_text, &group.target_end)?;
+        let source_end = boundary_end(&window.sources, source_text, &group.source_end)?;
+        let target_end = boundary_end(&window.targets, target_text, &group.target_end)?;
         if source_end <= source_start
             || target_end <= target_start
             || !has_content(&source_text[source_start..source_end])
